@@ -740,6 +740,61 @@ describe("getModel direct routing (no gateway)", () => {
     expect(handle.model.baseUrl).toBe("http://my-ollama:11434/v1");
   });
 
+  it("sends only the selected compatible model to its private inference binding", async () => {
+    const baseUrl = "http://inference:8000/team/v1";
+    const boundFetch = vi.fn<typeof fetch>(fetchStub);
+    const modelEnv = env({
+      CF_AI_GATEWAY: undefined, SELF_HOSTED_MODEL_BASE_URLS: JSON.stringify([baseUrl]),
+      SELF_HOSTED_MODEL: { fetch: boundFetch },
+    });
+    const config: AiModelConfig = {
+      provider: "openai-compatible", model: "team/alias:latest", apiUrl: baseUrl + "/",
+      apiToken: "model-key", contextWindow: 12345, outputLimit: 1234,
+    };
+    expect(() => getModel(modelEnv, { ...config, apiUrl: baseUrl + "/other" }, INITIATOR))
+        .toThrow("exact HTTP model API root");
+    const handle = getModel(modelEnv, config, INITIATOR);
+    expect(handle.model).toMatchObject({ api: "openai-completions", contextWindow: 12345, maxTokens: 1234 });
+    const request = await captureRequest(handle);
+    expect(boundFetch).toHaveBeenCalledTimes(1);
+    expect(request.url).toBe(baseUrl + "/chat/completions");
+    expect(request.headers.get("authorization")).toBe("Bearer model-key");
+    expect(JSON.parse(request.body)).toMatchObject({ model: config.model, stream: true });
+    // Other providers never gain the binding, even if they point at exactly the same API root.
+    await captureRequest(getModel(modelEnv, { ...config, provider: "openai" }, INITIATOR));
+    expect(boundFetch).toHaveBeenCalledTimes(1);
+    expect(() => getModel({ ...modelEnv, SELF_HOSTED_MODEL: undefined }, config, INITIATOR))
+        .toThrow("transport is unavailable");
+    expect(() => getModel(env(), config, INITIATOR)).toThrow("not supported through AI Gateway");
+    expect(() => getModel(modelEnv, config, INITIATOR, {
+      userGateway: { accountId: "test-account", apiKey: "gateway-key" },
+    })).toThrow("not supported via unified billing");
+  });
+
+  it("rejects public endpoint redirects without sending credentials to their destination", async () => {
+    const baseUrl = "https://inference.example/team/v1";
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "openai-compatible", model: "chat", apiToken: "", apiUrl: baseUrl,
+    }, INITIATOR);
+    const network = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const req = new Request(input, init);
+      expect(req.url).toBe(baseUrl + "/chat/completions");
+      expect(req.redirect).toBe("manual");
+      expect(req.headers.has("authorization")).toBe(false);
+      return Response.redirect("https://another.example/", 307);
+    });
+    try {
+      const message = await handle.stream(handle.model, {
+        messages: [{ role: "user", content: "hello", timestamp: 0 }],
+      }, { maxRetries: 0 }).result();
+      expect(message.stopReason).toBe("error");
+      expect(message.errorMessage).toContain("redirected");
+      expect(network).toHaveBeenCalledTimes(1);
+    } finally {
+      network.mockRestore();
+    }
+  });
+
   it("sends no Authorization header for an Ollama config without an API key", async () => {
     // An empty token means local auth: a strict local proxy may reject an unexpected bearer
     // token, so no Authorization header is sent at all (matching the pre-pi provider).

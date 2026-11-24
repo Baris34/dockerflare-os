@@ -42,6 +42,25 @@ async function userWithModel() {
 }
 
 describe("UserDurableObject model editing", () => {
+  it("validates compatible endpoints before storing them and binds stored keys to one root", async () => {
+    const { user } = await userWithModel();
+    const profile = { ...PROFILE, id: "team/alias" };
+    const config: AiModelConfig = {
+      provider: "openai-compatible", model: profile.id, apiToken: "team-key", apiUrl: "https://example.net/team/v1/",
+    };
+    for (const apiUrl of [undefined, "file:///etc", "https://me:key@example.net/v1",
+      "https://example.net/v1?token=test", "https://example.net/v1#key", "https://example.net/v1\0",
+      "http://unlisted/v1"]) {
+      await expect(user.addModel(profile, { ...config, apiUrl })).rejects.toThrow();
+    }
+    await expect(user.addModel(profile, { ...config, model: " " })).rejects.toThrow("model ID");
+    await user.addModel(profile, config);
+    const redacted = (await user.getModelConfig(profile.id)).config;
+    expect(redacted).toEqual({ ...config, apiToken: null, apiUrl: "https://example.net/team/v1" });
+    await user.updateModel(profile, { ...redacted, apiUrl: config.apiUrl });
+    await expect(user.updateModel(profile, { ...redacted, apiUrl: "https://example.net/other/v1" }))
+        .rejects.toThrow("re-enter");
+  });
   it("replaces secrets that are supplied, and drops headers that are omitted", async () => {
     const { user, stored } = await userWithModel();
     await user.updateModel(PROFILE, {

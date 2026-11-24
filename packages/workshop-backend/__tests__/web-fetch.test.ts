@@ -129,6 +129,13 @@ describe("webFetch document conversion", () => {
     ) as unknown as typeof globalThis.fetch;
   }
 
+  it("explains the missing conversion binding and supports raw HTML on self-hosted instances", async () => {
+    mockResponse("<p>local</p>", "text/html");
+    const url = "https://example.com/page";
+    await expect(webFetch({ gateway: null }, { url })).rejects.toThrow(/Workers AI.*raw: true/);
+    expect((await webFetch({ gateway: null }, { url, raw: true })).body).toBe("<p>local</p>");
+  });
+
   it("hands HTML responses to env.AI.toMarkdown", async () => {
     mockResponse("<h1>Title</h1><p>Body</p>", "text/html; charset=utf-8");
 

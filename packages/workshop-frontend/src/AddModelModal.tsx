@@ -3,6 +3,7 @@ import { Dialog, Button, Input, Select, Collapsible, useKumoToastManager } from 
 import { AiChatAuthorInfo, AiModelProvider, AiGatewayInfo, RedactedAiModelConfig, SUGGESTED_MODELS, modelKind } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { normalizeModelApiRoot } from '@gadgets/workshop-shared/model-api-root'
 import { ExtraHeadersEditor } from './features/ai-models/ExtraHeadersEditor'
 import { StoredSecretInput } from './features/ai-models/StoredSecretInput'
 import {
@@ -37,6 +38,7 @@ type SelectionType =
 const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   anthropic: 'sk-ant-...',
   openai: 'sk-...',
+  'openai-compatible': '(optional)',
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
@@ -50,7 +52,7 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
 const TOKEN_OPTIONAL_WITH_HEADERS: ReadonlySet<AiModelProvider> = new Set(['anthropic', 'openai'])
 
 const isTokenRequired = (provider: AiModelProvider, headerRows: readonly HeaderRow[]) =>
-  provider !== 'ollama' &&
+  provider !== 'ollama' && provider !== 'openai-compatible' &&
   !(TOKEN_OPTIONAL_WITH_HEADERS.has(provider) && headerRowsToRecord(headerRows) !== undefined)
 
 // Example used in the custom-model placeholders for providers that have no suggested models
@@ -59,6 +61,7 @@ const FALLBACK_EXAMPLE_MODEL = { modelId: 'gemma4:31b', name: 'Gemma 4 31B' }
 
 // Pick an example model to show in the custom-model placeholders for the given provider.
 function exampleModel(provider: AiModelProvider): { modelId: string, name: string } {
+  if (provider === 'openai-compatible') return { modelId: 'team-assistant', name: 'Team assistant' }
   const first = Object.entries(SUGGESTED_MODELS[provider])[0]
   return first ? { modelId: first[0], name: first[1].name } : FALLBACK_EXAMPLE_MODEL
 }
@@ -104,7 +107,9 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
 
     options.push({
       value: encodeSelection(provider),
-      label: `Other ${PROVIDER_LABELS[provider] || provider}...`,
+      label: provider === 'openai-compatible'
+        ? 'OpenAI-compatible endpoint'
+        : `Other ${PROVIDER_LABELS[provider] || provider}...`,
       provider,
     })
   }
@@ -144,13 +149,23 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const gatewayMode = aiConfig?.enabled === true
+  const compatible = selection?.provider === 'openai-compatible'
   const enabledProviders: Set<string> | null = gatewayMode
     ? new Set(aiConfig.enabledProviders)
     : null
 
   // The server keeps withheld secrets only for the endpoint they were configured for. Once the URL
   // changes, withheld values are shown (and sent) as blank, and header values must be re-entered.
-  const storedSecretsUsable = source !== null && apiUrl.trim() === (source.config.apiUrl ?? '')
+  let apiRoot = apiUrl.trim()
+  let apiRootError: string | undefined
+  if (compatible) {
+    try {
+      apiRoot = normalizeModelApiRoot(apiUrl)
+    } catch (error) {
+      apiRootError = (error as Error).message
+    }
+  }
+  const storedSecretsUsable = source !== null && apiRoot === (source.config.apiUrl ?? '')
   const effectiveApiToken = apiToken === null && !storedSecretsUsable ? '' : apiToken
 
   // Reset all state when dialog closes
@@ -207,7 +222,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       else if (chatModelsOnly && modelKind(selection.provider, modelId.trim()) === 'decision') {
         newErrors.modelId = "This is a decision model, which can't chat. Add it from AI Providers instead."
       }
-      if (!displayName.trim()) newErrors.displayName = 'Please enter a display name'
+      if (!compatible && !displayName.trim()) newErrors.displayName = 'Please enter a display name'
     }
 
     const isOllama = selection?.provider === 'ollama'
@@ -227,6 +242,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     if (showCredentials && isOllama && !apiUrl.trim()) {
       newErrors.apiUrl = 'Please enter the Ollama API URL'
     }
+    if (showCredentials && apiRootError) newErrors.apiUrl = apiRootError
 
     if (parseTokenLimit(contextWindow) === null) {
       newErrors.contextWindow = 'Please enter a positive whole number of tokens'
@@ -260,7 +276,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     try {
       const isSuggested = selection!.type === 'suggested'
       const finalModelId = isSuggested ? selection!.modelId : modelId.trim()
-      const finalDisplayName = isSuggested ? selection!.displayName : displayName.trim()
+      const finalDisplayName = isSuggested ? selection!.displayName : displayName.trim() || finalModelId
 
       const profile: AiChatAuthorInfo = {
         type: 'agent',
@@ -277,7 +293,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         model: finalModelId,
         apiToken: gatewayMode ? '' : effectiveApiToken?.trim() ?? null,
         ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
-        ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
+        ...(!gatewayMode && apiRoot && { apiUrl: apiRoot }),
         ...(extraHeaders && { extraHeaders }),
         ...(contextWindowTokens && { contextWindow: contextWindowTokens }),
         ...(outputLimitTokens && { outputLimit: outputLimitTokens }),
@@ -385,7 +401,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               <Input
                 label="Display Name"
                 placeholder={`e.g., ${example!.name}`}
-                description="Human-readable name shown in the UI"
+                description={compatible ? 'Optional. Defaults to the model ID.' : 'Human-readable name shown in the UI'}
                 value={displayName}
                 onChange={(e) => { setDisplayName(e.target.value); setErrors(prev => ({ ...prev, displayName: '' })) }}
                 error={errors.displayName}
@@ -414,7 +430,9 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               stored={storedSecretsUsable && source!.config.apiToken === null}
               placeholder={tokenRequired ? API_TOKEN_PLACEHOLDERS[selection.provider] : '(optional)'}
               description={
-                isOllama
+                compatible
+                  ? 'Leave blank if your model server does not require a bearer token.'
+                  : isOllama
                   ? 'Optional for local Ollama access'
                   : isCloudflare
                   ? 'An API token with Workers AI Read + Edit permissions (in the dashboard: Workers AI > Use REST API > Create a Workers AI API Token)'
@@ -428,16 +446,14 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             />
           )}
 
-          {/* Ollama API URL (always visible for Ollama) */}
-          {showCredentials && isOllama && (
+          {showCredentials && (isOllama || compatible) && (
             <Input
-              label="API URL"
-              placeholder="http://localhost:11434"
-              description="URL of your Ollama server"
+              label={compatible ? 'API root URL' : 'API URL'}
+              placeholder={compatible ? 'https://inference.example.net/team/v1' : 'http://localhost:11434'}
+              description={compatible ? 'Workshop appends /chat/completions to this URL.' : 'URL of your Ollama server'}
               value={apiUrl}
               onChange={(e) => { setApiUrl(e.target.value); setErrors(prev => ({ ...prev, apiUrl: '' })) }}
               error={errors.apiUrl}
-              variant={errors.apiUrl ? 'error' : 'default'}
             />
           )}
 
@@ -449,8 +465,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               <Collapsible.DefaultTrigger>Advanced Settings</Collapsible.DefaultTrigger>
               <Collapsible.DefaultPanel>
                 <div className="space-y-4">
-                  {/* Ollama shows its API URL above; Workers AI's endpoint is derived from the account ID. */}
-                  {showCredentials && !isOllama && !isCloudflare && (
+                  {showCredentials && !compatible && !isOllama && !isCloudflare && (
                     <Input
                       label="API URL"
                       placeholder="https://..."
@@ -459,7 +474,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                       onChange={(e) => setApiUrl(e.target.value)}
                     />
                   )}
-                  {showCredentials && (
+                  {showCredentials && !compatible && (
                     <ExtraHeadersEditor
                       rows={headerRows}
                       storedValuesUsable={storedSecretsUsable}

@@ -1,0 +1,27 @@
+# Only send the repository inputs used by the image stages.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.json
+!vite.config.ts
+!packages/
+!packages/**
+!scripts/
+!scripts/**
+!docker/
+!docker/**
+**/node_modules
+**/.git
+**/.npmrc
+**/.env*
+**/.dev.vars*
+**/.wrangler
+**/.aws
+**/.cache
+**/.vite
+**/.vite-plus
+**/dist
+**/dist-app
+**/*.tsbuildinfo
+**/wrangler.*.jsonc

@@ -18,6 +18,7 @@ import { chatKey, chatKeyPrefix } from "./storage-schema/overseer-storage.js";
 import { recordAnalytics } from "./analytics";
 import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
+import { compatibleModelEndpoint } from "./openai-compatible.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import type { AdminSettings } from "./admin-settings.js";
@@ -1508,7 +1509,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (this.storage.aiModels.get(profile.id) || models?.get(profile.id)) {
       throw new Error(`A model with ID "${profile.id}" already exists.`);
     }
-    this.#putModel(profile, resolveWithheldSecrets(config, source), models);
+    this.#putModel(profile, config, models, source);
   }
 
   async getModelConfig(id: string): Promise<{profile: AiChatAuthorInfo, config: RedactedAiModelConfig}> {
@@ -1523,7 +1524,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (config.provider !== stored.provider || config.model !== stored.model) {
       throw new Error("A model's provider and model ID can't be changed.");
     }
-    this.#putModel(profile, resolveWithheldSecrets(config, stored), models);
+    this.#putModel(profile, config, models, stored);
   }
 
   /** The stored record of a model the user added, throwing for AI Gateway models. */
@@ -1536,12 +1537,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record;
   }
 
-  #putModel(profile: AiChatAuthorInfo, config: AiModelConfig, models: GatewayModels | null) {
+  #putModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig, models: GatewayModels | null,
+            source?: AiModelConfig) {
     if (models && !models.addableProviders.includes(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
     }
     if (config.provider === "cloudflare-auto-router") {
       throw new Error("The Auto Router model runs only through an AI Gateway.");
+    }
+    if (config.provider === "openai-compatible") {
+      if (!config.model.trim()) throw new Error("A model ID is required.");
+      if (Object.keys(config.extraHeaders ?? {}).length) {
+        throw new Error("Use the API token to authenticate this Chat Completions connection.");
+      }
+      config = { ...config, apiUrl: compatibleModelEndpoint(this.env, config.apiUrl).baseUrl };
     }
     for (let limit of [config.contextWindow, config.outputLimit]) {
       if (limit !== undefined && !(Number.isSafeInteger(limit) && limit > 0)) {
@@ -1551,7 +1560,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // capnweb-validate lets through properties that RedactedAiModelConfig omits, and these are a
     // deployment's to set on its own models.
-    let {reasoning, compactionInputBudget, behavesLike, capabilities, ...own} = config;
+    let {reasoning, compactionInputBudget, behavesLike, capabilities, ...own} =
+        resolveWithheldSecrets(config, source);
 
     profile.type = "agent";
     this.storage.aiModels.put({profile, config: own});

@@ -139,6 +139,22 @@ describe('AddModelModal', () => {
     )
   })
 
+  it('adds an OpenAI-compatible model with only an API root and a served alias', async () => {
+    const { addModel } = await render({ type: 'add' })
+    await choose('OpenAI-compatible endpoint')
+    await type(labeledInput('Model ID'), 'team/alias:latest')
+    await type(labeledInput('API root URL'), 'https://inference.test/v1?key=secret')
+    await click(button('Add Model'))
+    expect(addModel).not.toHaveBeenCalled()
+    await type(labeledInput('API root URL'), 'https://inference.test/team/v1/')
+    await click(button('Add Model'))
+    expect(addModel).toHaveBeenCalledWith(
+      { type: 'agent', id: 'team/alias:latest', name: 'team/alias:latest' },
+      { provider: 'openai-compatible', model: 'team/alias:latest', apiUrl: 'https://inference.test/team/v1', apiToken: '' },
+      undefined,
+    )
+  })
+
   it('sends a secret only once the user replaces it', async () => {
     const { updateModel } = await render({ type: 'edit', source: { profile: PROFILE, config: CONFIG } })
 

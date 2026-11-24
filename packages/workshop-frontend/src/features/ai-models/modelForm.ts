@@ -10,6 +10,7 @@ import {
 export const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   anthropic: 'Anthropic',
   openai: 'OpenAI',
+  'openai-compatible': 'OpenAI-compatible',
   google: 'Google',
   cloudflare: 'Cloudflare Workers AI',
   ollama: 'Ollama',

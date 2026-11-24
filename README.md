@@ -193,11 +193,13 @@ This runs Cloudflare OS using `wrangler`, the Workers developer tooling CLI. Thi
 
 Your data will be stored in a subdirectory named `.wrangler`.
 
-### Deploy to your own server using `workerd`
+### Deploy on a Docker server
 
-**COMING SOON**
-
-Cloudflare OS can run entirely on `workerd`, Cloudflare's open source runtime for Workers. In fact, the "run locally" instructions above use `workerd` under the hood. We are still working on documentation and tooling to help you smoothly deploy the OS on top of `workerd` on your own servers. If you are feeling adventurous, [read the low-level documentation for workerd config](https://github.com/cloudflare/workerd/blob/main/src/workerd/server/workerd.capnp) (or point your agent at it) and have a go.
+Build the `web` and `workshop` targets from the repository root. The web image serves the UI;
+the Workshop image runs standalone workerd and stores its data in a named volume. Connect your
+existing inference endpoint by selecting **OpenAI-compatible endpoint** in the model picker.
+The [Docker installation guide](docker/README.md) includes the complete build, run, model
+configuration, upgrade and restore commands.
 
 #### Configuring external services
 

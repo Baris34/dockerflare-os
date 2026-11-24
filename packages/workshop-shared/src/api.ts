@@ -3416,7 +3416,8 @@ export type CloudflareAccountOption = {
  * model behind each request (see AUTO_ROUTER_MODEL_ID); it exists only inside a gateway.
  */
 export type AiModelProvider =
-    "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "cloudflare-auto-router";
+    "openai" | "openai-compatible" | "anthropic" | "google" | "cloudflare" | "ollama" |
+    "cloudflare-auto-router";
 
 /** The model ID of AI Gateway's Auto Router, the one model of "cloudflare-auto-router". */
 export const AUTO_ROUTER_MODEL_ID = "cloudflare/auto";
@@ -3673,8 +3674,7 @@ export type AiModelConfig = {
 
   /**
    * Secret API token for the respective provider, for billing purposes. For providers "anthropic",
-   * "openai", and "ollama", an empty token means no key is sent at all, e.g. because a proxy
-   * authenticated through `extraHeaders` supplies its own.
+   * "openai", "openai-compatible", and "ollama", an empty token means no key is sent.
    *
    * @secret
    */
@@ -3689,7 +3689,8 @@ export type AiModelConfig = {
   /**
    * URL of the API. If not specified, use the default for the provider. Overriding the URL is
    * useful in order to use AI proxy products like Cloudflare's AI gateway, or even to use an
-   * alternative provider that provides a compatible API.
+   * alternative provider that provides a compatible API. For "openai-compatible", this is the
+   * required API root to which the client appends `/chat/completions`.
    */
   apiUrl?: string;
 
@@ -3698,7 +3699,8 @@ export type AiModelConfig = {
    * These override the provider's default headers of the same name (including authentication
    * headers), which is useful for proxies that require their own credentials. Like `apiToken`
    * and `apiUrl`, these are ignored when the Workshop routes requests through its own AI
-   * Gateway configuration rather than contacting the provider directly.
+   * Gateway configuration rather than contacting the provider directly. The "openai-compatible"
+   * connection accepts only the optional bearer token.
    *
    * @secret
    */
@@ -3914,6 +3916,7 @@ const SUGGESTED_MODEL_CATALOG = {
   },
   "ollama": {
   },
+  "openai-compatible": {},
 } satisfies Record<AiModelProvider, Record<string, SuggestedModel>>;
 
 /**

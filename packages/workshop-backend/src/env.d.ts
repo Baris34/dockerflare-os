@@ -49,6 +49,9 @@ declare global {
       // Run + Read token; optional when the WORKERS_AI binding carries traffic.
       CF_AI_GATEWAY_API_TOKEN?: string;
       CF_AI_GATEWAY_USE_BINDING?: string;
+      // Self-hosted deployments can grant the model client inference access to exact API roots.
+      SELF_HOSTED_MODEL_BASE_URLS?: string; // JSON array of canonical roots.
+      SELF_HOSTED_MODEL?: Pick<Fetcher, "fetch">;
       // Note: outside gateway mode, Workers AI (provider "cloudflare") is BYOK like every other
       // provider -- the account ID and API token live in the user's model config, not in env.
 

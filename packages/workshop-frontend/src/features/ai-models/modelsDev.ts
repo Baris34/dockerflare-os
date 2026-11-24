@@ -21,6 +21,7 @@ export type ModelSuggestion = GatewayModel
 const MODELS_DEV_PROVIDER_IDS: Record<AiModelProvider, string | null> = {
   anthropic: 'anthropic',
   openai: 'openai',
+  'openai-compatible': null,
   google: 'google',
   cloudflare: 'cloudflare-workers-ai',
   ollama: null,

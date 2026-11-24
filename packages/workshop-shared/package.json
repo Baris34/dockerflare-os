@@ -7,6 +7,10 @@
       "types": "./src/api.ts",
       "import": "./src/api.ts"
     },
+    "./model-api-root": {
+      "types": "./src/model-api-root.ts",
+      "import": "./src/model-api-root.ts"
+    },
     "./feature-flags": {
       "types": "./src/feature-flags.ts",
       "import": "./src/feature-flags.ts"

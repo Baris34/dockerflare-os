@@ -11,6 +11,12 @@ const TOKEN = "model-token-secret";
 const HEADER_SECRET = "header-secret";
 
 const model = scriptedChatCompletions([{ text: "Secrets retained." }]);
+const apiRoot = "https://inference.test/team/v1";
+const compatibleModel = scriptedChatCompletions([
+  { toolCall: { id: "list-templates", name: "listBlueprints", arguments: {} } },
+  { text: "Templates retrieved." },
+]);
+let modelLoaded = false;
 const providerRequests: { authorization: string | null; providerSecret: string | null }[] = [];
 // The only handler, so a request sent anywhere else is recorded as unmocked.
 const recordingHandler: Handler = (url, method, headers, request) => {
@@ -21,7 +27,13 @@ const recordingHandler: Handler = (url, method, headers, request) => {
   });
   return model.handler(url, method, headers, request);
 };
-const network = new NetworkInterceptor({ handlers: [recordingHandler] });
+const compatibleHandler: Handler = (url, method, headers, request) => {
+  if (url.href !== `${apiRoot}/chat/completions`) return null;
+  expect(headers.has("authorization")).toBe(false);
+  if (!modelLoaded) return Response.json({ error: { message: "Alias is not loaded." } }, { status: 404 });
+  return compatibleModel.handler(url, method, headers, request);
+};
+const network = new NetworkInterceptor({ handlers: [recordingHandler, compatibleHandler] });
 
 let harness: Harness | undefined;
 
@@ -79,4 +91,36 @@ it("editing a model keeps its secrets usable without returning them", async () =
   for (const request of providerRequests) {
     expect(request).toEqual({ authorization: `Bearer ${TOKEN}`, providerSecret: HEADER_SECRET });
   }
+});
+
+it("retries the configured OpenAI-compatible alias and sends the tool result to the same API root", async () => {
+  if (harness === undefined) throw new Error("Workshop harness did not start");
+  const [name] = nextUsernames("compatible");
+  using publicApi = connect(harness.url);
+  using api = await signUp(publicApi, name);
+  const alias = "team/assistant:latest";
+  await api.addModel({ type: "agent", id: alias, name: "Assistant" }, {
+    provider: "openai-compatible", model: alias, apiUrl: `${apiRoot}/`, apiToken: "",
+  });
+  using ws = await api.newWorkspace();
+  const chatId = await ws.newChat("What templates can I use?", alias);
+  await waitForIdleChat(ws, chatId);
+  const failed = await loadAllChatHistory(before => ws.getChatHistory(chatId, before));
+  expect(failed).toContainEqual(expect.objectContaining({
+    type: "error", message: expect.stringContaining("Alias is not loaded."),
+  }));
+  modelLoaded = true;
+  await ws.retryAgent(chatId, alias);
+  await waitForIdleChat(ws, chatId);
+  const history = await loadAllChatHistory(before => ws.getChatHistory(chatId, before));
+  expect(history).toContainEqual(expect.objectContaining({ message: "Templates retrieved." }));
+  expect(compatibleModel.requests).toEqual([
+    expect.objectContaining({ model: alias, stream: true, tools: expect.any(Array) }),
+    expect.objectContaining({
+      model: alias, stream: true,
+      messages: expect.arrayContaining([
+        expect.objectContaining({ role: "tool", tool_call_id: "list-templates", content: expect.any(String) }),
+      ]),
+    }),
+  ]);
 });

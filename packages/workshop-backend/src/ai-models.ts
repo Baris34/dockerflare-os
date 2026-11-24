@@ -38,6 +38,7 @@ import {
   type AiGatewayLogRoute,
 } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
+import { compatibleModelEndpoint } from "./openai-compatible.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 import {
   estimateSharedHeadTokens, hasGpt56PromptCaching, splitSystemPrompt,
@@ -312,7 +313,7 @@ function workersAiCompat(catalog: CatalogEntry | undefined): OpenAICompletionsCo
 // native API, since the translation drops provider features pi relies on (extended thinking,
 // Anthropic cache_control prompt caching, the OpenAI Responses API). Billing -- including unified
 // billing on a user's own gateway -- is orthogonal to which API a request speaks. Returns
-// undefined for providers AI Gateway cannot serve (ollama).
+// undefined for direct-only providers.
 function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Api> | undefined {
   const catalog = gatewayCatalogModel(config);
   const window = modelTokenWindow(config, catalog);
@@ -528,7 +529,8 @@ type HandleArgs = {
   aiGatewayLogRoute?: AiGatewayLogRoute;
   // Transport override for every request on this handle: how a binding-routed model reaches the
   // gateway over env.WORKERS_AI.fetch() instead of the global fetch (see bindingFetch).
-  // A per-call options.fetch still wins, which tests rely on to capture requests.
+  // A per-call options.fetch can substitute the gateway transport. Direct compatible connections
+  // always use their selected destination and redirect policy.
   fetch?: FetchFunction;
   // The reasoning level of main turns, and the ID of the pi entry the model's flags come from
   // (see reasoningOptions). No level gives the model its built-in request (see builtInReasoning).
@@ -570,7 +572,8 @@ function makeHandle(args: HandleArgs): ModelHandle {
             ? { "cf-aig-metadata": JSON.stringify(args.gatewayMetadata) }
             : {}),
       };
-      const baseFetch = options.fetch ?? args.fetch;
+      const baseFetch = args.model.provider === "openai-compatible"
+          ? args.fetch : options.fetch ?? args.fetch;
       let fetch = baseFetch;
       if (args.model.api === "google-generative-ai" &&
           headers["x-goog-api-key"] === null) {
@@ -819,7 +822,7 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
     return getModelViaGateway(gwConfig, config, initiator, options);
   }
 
-  return getModelDirect(config, options.sessionAffinity);
+  return getModelDirect(env, config, options.sessionAffinity);
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -978,7 +981,8 @@ function directAuth(config: AiModelConfig, keyHeader: string): Pick<HandleArgs, 
 }
 
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
-function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
+function getModelDirect(env: Cloudflare.Env, config: AiModelConfig,
+                        sessionAffinity?: string): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
@@ -1043,6 +1047,19 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         headers: config.extraHeaders,
         sessionAffinity,
       });
+    case "openai-compatible": {
+      const { baseUrl, fetch } = compatibleModelEndpoint(env, config.apiUrl);
+      return makeHandle({
+        model: {
+          id: config.model, name: config.model, api: "openai-completions",
+          provider: config.provider, baseUrl, input: ["text"], reasoning: false, cost: ZERO_COST,
+          ...window,
+          compat: { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" },
+        },
+        ...directAuth(config, "Authorization"),
+        fetch,
+      });
+    }
     case "ollama":
       // `apiUrl` is the Ollama server base; its OpenAI-compat endpoint lives under /v1. Accept
       // (and strip) a trailing `/api` or `/v1` path: configs saved before the pi migration store
@@ -1074,14 +1091,6 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           // out it clearly wasn't getting the system prompt. And when I disabled  the "developer"
           // role, the problem was fixed. In contrast, though, Gemma 4 running under otherwise
           // exactly the same setup does understand the "developer" role and works fine. Weird!
-          //
-          // Some users also filed issues about this because they were trying to use the ollama
-          // provider as a way to target an arbitrary third-party OpenAI-compatible provider. This
-          // is not the intended use case for the ollama provider -- we should add an explicit
-          // provider for this. The ollama provider could in the future switch to using the ollama
-          // native API rather than the OpenAI-compatible endpoint, which would break users using
-          // it in this way. That said, if this flag works as a temporary work-around for them
-          // util we add a real OpenAI provider option... great.
           compat: catalog?.compat ?? {supportsDeveloperRole: false},
 
           ...window,

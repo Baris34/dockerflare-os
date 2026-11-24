@@ -26,7 +26,7 @@ import type { AiGatewayConfig } from "./ai-gateway";
  * so the caller can pass a stub in tests without constructing a full Cloudflare.Env.
  */
 export type WebFetchEnv = {
-  ai: Ai;
+  ai?: Ai;
   gateway: AiGatewayConfig | null;
   /**
    * The only hosts the fetch may reach, redirects included, or undefined for any public host. Set
@@ -278,6 +278,9 @@ async function convertToMarkdown(
   const mime = baseContentType(contentType);
   if (!TO_MARKDOWN_MIME_TYPES.has(mime)) {
     return null;
+  }
+  if (!env.ai) {
+    throw new Error("Document conversion requires Workers AI on this deployment. Use raw: true for text content.");
   }
 
   // Build a name from the URL path so toMarkdown's format detection has a hint.
