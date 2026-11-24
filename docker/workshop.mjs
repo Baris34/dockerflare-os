@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { normalizeModelApiRoot } from "../packages/workshop-shared/src/model-api-root.ts";
+import { configuredModelApiRoots } from "../packages/workshop-shared/src/model-api-root.ts";
 
 function jsonSetting(value, fallback, name) {
   if (value === undefined) return fallback;
@@ -24,10 +24,10 @@ export function deploymentOptions(env) {
       url.pathname !== "/" || url.href !== url.origin + "/") {
     throw new Error("PUBLIC_BASE_URL must be an HTTP(S) origin");
   }
-  const roots = stringList(env, "SELF_HOSTED_MODEL_BASE_URLS").map(normalizeModelApiRoot);
+  const roots = configuredModelApiRoots(env.SELF_HOSTED_MODEL_BASE_URLS);
   const vendors = (env.GATEKEEPERS ?? "context,scheduler").split(",").map(s => s.trim()).filter(Boolean);
   return {
-    origin: url.origin, roots: [...new Set(roots)], vendors: [...new Set(vendors)],
+    origin: url.origin, roots, vendors: [...new Set(vendors)],
     admins: stringList(env, "ADMINS"), env,
   };
 }
@@ -118,6 +118,12 @@ function appWorker(bundle, options, selectedVendors) {
     }
     Object.assign(vars, credentials);
     vars.BASE_URL = options.origin + "/gatekeeper/" + id;
+    if (name === "gatekeeper-azure-repos") {
+      if (!options.env.AZURE_DEVOPS_COLLECTION_URL) throw new Error("Set AZURE_DEVOPS_COLLECTION_URL for Azure Repos.");
+      vars.AZURE_DEVOPS_COLLECTION_URL = options.env.AZURE_DEVOPS_COLLECTION_URL;
+      if (options.env.AZURE_DEVOPS_API_VERSION) vars.AZURE_DEVOPS_API_VERSION = options.env.AZURE_DEVOPS_API_VERSION;
+      bindings.push({ name: "AZURE_NETWORK", service: "azure-transport" });
+    }
   }
   for (const [key, value] of Object.entries(vars)) {
     bindings.push(typeof value === "string" ? { name: key, text: value } : { name: key, json: json(value) });
@@ -191,6 +197,22 @@ export function runtimeServices(bundles, options) {
       },
     });
   }
+  if (active.has("gatekeeper-azure-repos")) {
+    services.push({
+      name: "azure-network", network: { allow: ["public", "private", "local"], tlsOptions: {
+        trustBrowserCas: true, ...(options.azureCas && {trustedCertificates: options.azureCas}),
+      } },
+    }, {
+      name: "azure-transport", worker: {
+        compatibilityDate: "2026-09-04",
+        modules: [{name: "azure-network.js", esModule: embed("/docker/azure-network.mjs")}],
+        bindings: [
+          {name: "COLLECTION", text: options.env.AZURE_DEVOPS_COLLECTION_URL},
+          {name: "AZURE_UPSTREAM", service: "azure-network"},
+        ],
+      },
+    });
+  }
   return services;
 }
 
@@ -209,6 +231,11 @@ export function renderConfig(bundles, options) {
 
 async function main() {
   const options = deploymentOptions(process.env);
+  if (options.vendors.includes("azurerepos") && process.env.AZURE_DEVOPS_CA_FILE) {
+    const pem = await readFile(process.env.AZURE_DEVOPS_CA_FILE, "utf8");
+    options.azureCas = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+    if (!options.azureCas?.length) throw new Error("AZURE_DEVOPS_CA_FILE must contain PEM certificates.");
+  }
   const bundles = await Promise.all((await readdir("/app/workers")).map(async name =>
     JSON.parse(await readFile(join("/app/workers", name, "bundle.json"), "utf8"))));
   const config = renderConfig(bundles, options);

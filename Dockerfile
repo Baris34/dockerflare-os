@@ -11,6 +11,7 @@ FROM deps AS source
 COPY tsconfig.json vite.config.ts ./
 COPY packages/ packages/
 COPY scripts/ scripts/
+COPY docker/azure-network.mjs docker/model-transport.mjs docker/
 RUN pnpm install --offline --frozen-lockfile
 
 FROM source AS web-build
@@ -44,7 +45,7 @@ COPY --from=runtime-files --chown=1000:1000 /volume-root/ /
 COPY --from=worker-build /out/native/${TARGETARCH}/workerd /usr/local/bin/workerd
 COPY --from=worker-build /out/workers/ ./workers/
 COPY --from=worker-build /out/storage/ ./storage/
-COPY docker/workshop.mjs docker/model-transport.mjs ./docker/
+COPY docker/workshop.mjs docker/model-transport.mjs docker/azure-network.mjs ./docker/
 COPY packages/workshop-shared/src/model-api-root.ts ./packages/workshop-shared/src/
 USER node
 VOLUME /data

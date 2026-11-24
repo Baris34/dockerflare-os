@@ -12,3 +12,17 @@ export function normalizeModelApiRoot(value: string | undefined): string {
   }
   return url.href.replace(/\/+$/, "");
 }
+
+/** Parse the operator's JSON array into the canonical roots allowed for private model traffic. */
+export function configuredModelApiRoots(setting: string | undefined): string[] {
+  let values: unknown;
+  try {
+    values = JSON.parse(setting ?? "[]");
+  } catch {
+    throw new Error("SELF_HOSTED_MODEL_BASE_URLS must be a JSON array of API roots.");
+  }
+  if (!Array.isArray(values) || !values.every(value => typeof value === "string")) {
+    throw new Error("SELF_HOSTED_MODEL_BASE_URLS must be a JSON array of API roots.");
+  }
+  return [...new Set(values.map(normalizeModelApiRoot))];
+}

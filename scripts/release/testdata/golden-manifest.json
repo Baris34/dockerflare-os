@@ -18,6 +18,54 @@
   "manifestVersion": 1,
   "releaseId": "r000000-fixture",
   "workers": {
+    "gatekeeper-azure-repos": {
+      "bindings": [],
+      "compatibilityDate": "2026-09-04",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "nodejs_als"
+      ],
+      "inputs": [
+        {
+          "help": "Use the full collection path, including the virtual directory, for example https://devops.example.com/tfs/DefaultCollection.",
+          "kind": "var",
+          "label": "Azure DevOps Server HTTPS collection URL",
+          "name": "AZURE_DEVOPS_COLLECTION_URL"
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "azure-repos.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "UserAccount",
+            "AzureBranchGatekeeper"
+          ],
+          "tag": "v0"
+        }
+      ],
+      "modules": [
+        {
+          "name": "azure-repos.js",
+          "r2Key": "blobs/modules/a365752e4fa8957c89cba33f55b3ead6d38bc26e311f4c521aa16334b466b170",
+          "sha256": "a365752e4fa8957c89cba33f55b3ead6d38bc26e311f4c521aa16334b466b170",
+          "size": 64,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "azurerepos",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/azurerepos"
+      }
+    },
     "gatekeeper-cloudflare": {
       "bindings": [
         {

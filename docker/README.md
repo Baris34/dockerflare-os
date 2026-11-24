@@ -59,6 +59,8 @@ docker logs --tail 30 workshop
 
 ## Bağlayıcılar
 
+Şirket içi Azure DevOps Server için `GATEKEEPERS=context,scheduler,azurerepos` ve `AZURE_DEVOPS_COLLECTION_URL` ayarlarını kullan. Bağlantı, tarayıcıda kişisel PAT ile kurulur. [Azure Repos kurulumu ve ilk .NET denemesi](../packages/gatekeeper-azure-repos/README.md)
+
 `GATEKEEPERS` virgülle ayrılmış etkin bağlayıcı listesidir. Varsayılan `context,scheduler` ile Context Library ve Scheduled Tasks yerel depolamayı kullanır. GitHub örneğinde listeyi `context,scheduler,github` yap ve korumalı env dosyasına `GATEKEEPER_GITHUB_CONFIG={"CLIENT_ID":"…","CLIENT_SECRET":"…"}` ekle. Bağlayıcı kendi ayarlarını alır. OAuth uygulamasında dönüş adresi `PUBLIC_BASE_URL/gatekeeper/github/oauth` olur. Oturum açma için de kullanmak istersen `AUTH_GATEKEEPERS=github` ver. [GitHub kurulum ayrıntıları](../packages/gatekeeper-github/README.md)
 
 İmajla paketlenen diğer isteğe bağlı bağlayıcılar `cloudflare`, `confluence`, `gitlab`, `google`, `homeassistant`, `linear`, `mcp`, `mcpportal`, `microsoft`, `notion`, `pagerduty`, `slack`, `spotify`, `supabase`, `x` ve `zoominfo`. İlgili paketin README dosyasında gereken erişim bilgileri bulunur. Her vendor kendi çalışır hesabını ve erişimini gerektirir. Cloudflare Email Routing ve Workers AI tabanlı Web Search bu dağıtımın dışındadır. Browser Rendering isteyen dışa aktarımlar ve Workers AI ile belge dönüşümü ek bulut binding’i gerektirir. Metin içerikleri `webFetch` ile `raw: true` kullanılarak okunabilir.

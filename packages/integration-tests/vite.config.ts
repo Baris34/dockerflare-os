@@ -55,6 +55,7 @@ export default {
         // `cf-os api`, whose command table is generated.
         dependsOn: [
           'build:test-gatekeeper', 'build:upgrade-base',
+          '@gadgets/azure-repos-gatekeeper#build:integration-worker',
           '@gadgets/github-gatekeeper#build:integration-worker',
           '@gadgets/google-gatekeeper#build:integration-worker',
           '@gadgets/gatekeeper-context#build:integration-worker',

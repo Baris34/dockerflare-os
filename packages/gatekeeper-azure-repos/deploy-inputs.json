@@ -1,0 +1,8 @@
+[
+  {
+    "name": "AZURE_DEVOPS_COLLECTION_URL",
+    "kind": "var",
+    "label": "Azure DevOps Server HTTPS collection URL",
+    "help": "Use the full collection path, including the virtual directory, for example https://devops.example.com/tfs/DefaultCollection."
+  }
+]

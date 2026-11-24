@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
 import { getDevServerConfig } from "./dev-server-config.ts";
+import { devModelWorkerConfig } from "./dev-model/config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
@@ -65,6 +66,9 @@ function loadDevVars(): void {
   }
 }
 loadDevVars();
+
+const devModel = devModelWorkerConfig(process.env.SELF_HOSTED_MODEL_BASE_URLS);
+const devModelPath = join(SCRIPTS_DIR, "dev-model", "wrangler.dev.jsonc");
 
 const useWorkersAi = process.argv.includes("--use-workers-ai-binding");
 
@@ -120,7 +124,9 @@ function findGatekeepers(parentDir: string): Gatekeeper[] {
 // TypeScript edit reaches `pnpm dev-server` without a separate step.
 await generateWorkerConfigs({ check: false });
 
-const gatekeepers = findGatekeepers(PACKAGES_DIR);
+const azureCollection = process.env.AZURE_DEVOPS_COLLECTION_URL;
+const azureTransportPath = join(SCRIPTS_DIR, "dev-azure", "wrangler.dev.jsonc");
+const gatekeepers = findGatekeepers(PACKAGES_DIR).filter(gk => gk.name !== "gatekeeper-azure-repos" || azureCollection);
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -511,6 +517,7 @@ const SHARED_GATEKEEPER_CREDS: Record<string, { id: string; secret: string }> = 
 // `.dev.vars` is gitignored, so it cannot leave the machine. Secrets travel the same way
 // `CLIENT_SECRET` already does, via SHARED_GATEKEEPER_CREDS above.
 const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
+  "gatekeeper-azure-repos": ["AZURE_DEVOPS_COLLECTION_URL", "AZURE_DEVOPS_API_VERSION"],
   "gatekeeper-mcp-portal": [
     "MCP_PORTAL_URL", "MCP_PORTAL_NAME", "MCP_PORTAL_AUTH", "MCP_PORTAL_TOKEN",
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_PORTAL_HIDDEN_SERVER_IDS", "MCP_ALLOW_INSECURE",
@@ -542,6 +549,15 @@ for (const gk of gatekeepers) {
   config.build = devBuildConfig(config.build, gk.dir);
   config.vars = config.vars || {};
   config.vars.BASE_URL = `http://${backendHost}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
+
+  if (gk.name === "gatekeeper-azure-repos" && azureCollection) {
+    const service = "dev-azure-transport";
+    (config.services ??= []).push({ binding: "AZURE_NETWORK", service });
+    writeFileSync(azureTransportPath, JSON.stringify({
+      name: service, main: "worker.mjs", compatibility_date: config.compatibility_date,
+      vars: { COLLECTION: azureCollection },
+    }));
+  }
 
   const shared = SHARED_GATEKEEPER_CREDS[gk.name];
   if (shared && process.env[shared.id] && process.env[shared.secret]) {
@@ -654,6 +670,13 @@ for (const gk of gatekeepers) {
     config.ai = { binding: "WORKERS_AI" };
   }
 
+  if (devModel) {
+    const { roots, ...worker } = devModel;
+    config.vars.SELF_HOSTED_MODEL_BASE_URLS = JSON.stringify(roots);
+    config.services.push({ binding: "SELF_HOSTED_MODEL", service: worker.name });
+    writeFileSync(devModelPath, JSON.stringify({ ...worker, compatibility_date: config.compatibility_date }));
+  }
+
   // In run-local mode, serve the pre-built frontend bundle as static assets directly from the
   // backend Worker (mirrors the production layout). The dev-router forwards all non-gatekeeper
   // requests here; `run_worker_first` ensures the Worker handles the API routes while everything
@@ -682,6 +705,8 @@ const configs = [
   join("packages", "workshop-backend", "wrangler.dev.jsonc"),
   ...gatekeepers.map(gk => join(gk.dir, "wrangler.dev.jsonc")),
   join(PDF_RENDERER_DIR, "wrangler.dev.jsonc"),
+  ...(devModel ? [devModelPath] : []),
+  ...(azureCollection ? [azureTransportPath] : []),
 ];
 
 const args = configs.flatMap(c => ["-c", c]);

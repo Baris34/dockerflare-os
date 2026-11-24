@@ -1,0 +1,25 @@
+{
+  "name": "@gadgets/azure-repos-gatekeeper",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/azure-repos.ts",
+  "scripts": {
+    "deploy": "vp run --no-cache build:configurator && wrangler deploy",
+    "test:run": "vp run -F @gadgets/azure-repos-gatekeeper build:configurator && vitest run && vitest run -c vitest.worker.config.ts && node --test __tests__/contract/checkout.test.mjs"
+  },
+  "dependencies": {
+    "@gadgets/configurator-ui": "workspace:*",
+    "@gadgets/gatekeeper-kit": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "catalog:",
+    "capnweb-validate": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
+    "@gadgets/scripts": "workspace:*",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}
