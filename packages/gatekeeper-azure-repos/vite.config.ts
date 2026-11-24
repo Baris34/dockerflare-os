@@ -1,15 +1,30 @@
 import configurator from "@gadgets/scripts/gatekeeper-configurator";
 import { TESTS_WITH_TIMEOUT_ENV, vitestTask, withTestTimeout } from "@gadgets/scripts/vitest-task";
 
+const frame = configurator.run.tasks["build:configurator"];
+
 export default {
   ...configurator,
   run: {
     ...configurator.run,
     tasks: {
       ...configurator.run.tasks,
+      "build:branch-types": {
+        command: "node build-types.mjs",
+        cache: {
+          input: ["src/types.d.ts", "build-types.mjs"],
+          output: ["src/generated/branch-types.txt"],
+        },
+      },
       "build:configurator": {
-        ...configurator.run.tasks["build:configurator"],
-        command: [configurator.run.tasks["build:configurator"].command, "node build-types.mjs"],
+        ...frame,
+        dependsOn: [...frame.dependsOn, "build:branch-types"],
+        cache: {
+          ...frame.cache,
+          input: [...frame.cache.input, { pattern: "src/configurator/**", base: "package" }],
+          // Replaying the contract generator must never restore an older picker beside it.
+          output: ["src/generated/*-configurator-ui.txt", "src/generated/*.js", "src/generated/*.js.map"],
+        },
       },
       "build:integration-worker": {
         command: withTestTimeout("capnweb-validate build --out .wrangler/validate"),

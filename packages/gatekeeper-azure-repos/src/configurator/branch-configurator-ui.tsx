@@ -6,6 +6,9 @@ import type { BranchConfiguratorRpc as Rpc, BranchConfiguratorValues as Values }
 
 // The host collects outside render. Update a moved tip only if these are still the values on screen.
 let form: ConfiguratorUIRenderContext<Rpc, Values> | undefined;
+// One iframe belongs to one connected account. Keep only the active project's compact catalog
+// here so a keystroke or “Load more” does not refetch thousands of repositories from Azure.
+let catalog: {projectId: string; rows: ReturnType<Rpc["repositoryCatalog"]>} | undefined;
 
 const clearBranch = { refName: null, commitId: null };
 const clearRepository = { repositoryId: null, repositoryName: null, ...clearBranch };
@@ -17,15 +20,17 @@ const namedItem = ({ id, name }: { id: string; name: string }): ConfiguratorUIHi
   ({ id, title: name, subtitle: id, kind: "leaf" });
 
 function picker(
-  title: string, empty: string, load: (cursor: string | null) => Promise<ConfiguratorUIHierarchyPage>,
+  title: string, empty: string, load: (cursor: string | null, query: string) => Promise<ConfiguratorUIHierarchyPage>,
   choose: (item: ConfiguratorUIHierarchyItem) => void,
+  searchPlaceholder?: string,
 ) {
   return <HierarchyPicker
     name={title}
     root={{ id: title, title }}
-    loadItems={async ({ cursor }) => {
-      const page = await load(cursor);
-      return !cursor && !page.nextCursor && !page.items.length ? { ...page, notice: empty } : page;
+    searchPlaceholder={searchPlaceholder}
+    loadItems={async ({ cursor, query }) => {
+      const page = await load(cursor, query);
+      return !cursor && !page.nextCursor && !page.items.length ? { ...page, notice: page.notice ?? empty } : page;
     }}
     onChange={(_id, item) => { if (item) choose(item); }}
   />;
@@ -52,6 +57,7 @@ export default {
     form = context;
     const { values, setValues, ui } = context;
     const { projectId, repositoryId, refName } = values;
+    if (catalog?.projectId !== projectId) catalog = undefined;
     return <Section>
       {projectId
         ? <Notice action={{ label: "Change project", onClick: () => setValues(clearProject) }}>
@@ -65,10 +71,23 @@ export default {
         ? <Notice action={{ label: "Change repository", onClick: () => setValues(clearRepository) }}>
             Repository · <bdi style={identifierStyle}>{values.repositoryName}</bdi>
           </Notice>
-        : picker("Repositories", "This project has no visible Git repositories.", async cursor => {
-            const page = await ui.listRepositories(projectId, cursor);
-            return { items: page.items.map(namedItem), nextCursor: page.nextCursor };
-          }, item => setValues({ ...clearBranch, repositoryId: item.id, repositoryName: item.title })))}
+        : picker("Repositories", "This project has no visible Git repositories.", async (cursor, query) => {
+            if (!catalog || catalog.projectId !== projectId) {
+              const rows = ui.repositoryCatalog(projectId);
+              catalog = { projectId, rows };
+              rows.catch(() => { if (catalog?.rows === rows) catalog = undefined; });
+            }
+            const repos = await catalog.rows;
+            const needle = query.trim().toLowerCase();
+            const matches = needle ? repos.filter(repo => repo.name.toLowerCase().includes(needle)) : repos;
+            const start = Number(cursor ?? 0);
+            const end = start + 100;
+            return {
+              items: matches.slice(start, end).map(namedItem),
+              nextCursor: end < matches.length ? String(end) : undefined,
+              notice: needle && !matches.length ? "No matching repositories." : undefined,
+            };
+          }, item => setValues({ ...clearBranch, repositoryId: item.id, repositoryName: item.title }), "Search repositories"))}
       {projectId && repositoryId && (refName
         ? <Notice action={{ label: "Change branch", onClick: () => setValues(clearBranch) }}>
             Branch · <bdi style={identifierStyle}>{branchName(refName)}</bdi><br />

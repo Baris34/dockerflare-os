@@ -1,7 +1,14 @@
 const guid = "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}";
 const collectionRead = new RegExp(`^/_apis/(?:connectionData|projects(?:/${guid})?|permissions/${guid}/2)/?$`, "i");
 const repositoryRead = new RegExp(`^/${guid}/_apis/git/repositories(?:/${guid}(?:/(?:refs|items|commits(?:/[0-9a-f]{40})?|diffs/commits|trees/[0-9a-f]{40}))?)?/?$`, "i");
-const gitPath = new RegExp(`^/${guid}/_git/${guid}/(info/refs|git-upload-pack)$`, "i");
+const gitPath = /^\/([^/]+)\/_git\/([^/]+)\/(info\/refs|git-upload-pack)$/;
+
+function validGitSegment(segment) {
+  try {
+    const name = decodeURIComponent(segment);
+    return name !== "." && name !== ".." && !name.startsWith("_") && !/[\\/?#\p{Cc}]|%[\da-f]{2}/iu.test(name);
+  } catch { return false; }
+}
 
 /** Only the Azure worker receives this service; the operator controls the upstream collection. */
 export default {
@@ -14,7 +21,8 @@ export default {
         !target.pathname.startsWith(base + "/") || target.username || target.password) {
       return new Response("Unknown Azure collection", {status: 403});
     }
-    const git = gitPath.exec(path)?.[1];
+    const match = gitPath.exec(path);
+    const git = match && validGitSegment(match[1]) && validGitSegment(match[2]) && match[3];
     const read = request.method === "GET" &&
       (collectionRead.test(path) || repositoryRead.test(path) ||
         (git === "info/refs" && target.search === "?service=git-upload-pack"));

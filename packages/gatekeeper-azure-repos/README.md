@@ -15,7 +15,7 @@ Workshop’a giriş yaptıktan sonra kişisel Azure PAT’ini bağlayıp erişeb
 
 3. Repo kökünde `pnpm.cmd run-local` çalıştır ve `http://localhost:8787` adresini aç. İlk çalıştırmada pnpm bağımlılıkları indirir ve ön yüzü derler. Ayarlar değiştiğinde süreci yeniden başlat. Modeli **AI providers → Add provider → OpenAI-compatible endpoint** üzerinden kaydet ve sohbet için seç. API kökü izin listesindeki adresle eşleşmeli.
 4. Sohbette **Add connection** ekranını aç, **Azure Repos branch** seç ve Azure hesabını bağla. **Connect Azure Repos** penceresindeki **Personal access token** alanına kişisel PAT’ini gir. Pilot için **Code (Read)** ve **Project and Team (Read)** kapsamlarını kullan. PAT yalnız bu formda kullanılır. [Proje listeleme](https://learn.microsoft.com/en-us/rest/api/azure/devops/core/projects/list?view=azure-devops-rest-7.1) · [Git ref okuma](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/refs/list?view=azure-devops-rest-7.0)
-5. Projeni, reponu ve dalını seç. Ekrandaki 40 karakterlik commit kimliğini kontrol edip bağlantıyı ekle. Seçim sırasında dal ilerlerse Workshop güncel kimliği tekrar onaylatır.
+5. Projeni seç. **Search repositories** alanına repo adının bir bölümünü yaz. Arama seçili projede hesabının görebildiği tüm repoları kapsar. Repoyu ve dalı seçtikten sonra 40 karakterlik commit kimliğini kontrol edip bağlantıyı ekle. Seçim sırasında dal ilerlerse Workshop güncel kimliği tekrar onaylatır.
 
 İlk sohbette şu isteği deneyebilirsin.
 

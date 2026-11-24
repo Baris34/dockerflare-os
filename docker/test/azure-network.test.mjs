@@ -18,6 +18,12 @@ test("Azure access stays inside the operator collection and grants only reads an
     [collection + "/" + id + "/_apis/git/repositories/" + id + "/refs?filter=heads%2F", "GET", 200],
     [root + "/info/refs?service=git-upload-pack", "GET", 200],
     [root + "/git-upload-pack", "POST", 200],
+    [collection + "/Tak%C4%B1m%20A/_git/Pilot%20.NET/info/refs?service=git-upload-pack", "GET", 200],
+    [collection + "/Tak%C4%B1m%20A/_git/Pilot%20.NET/git-upload-pack", "POST", 200],
+    [collection + "/%252fother/_git/Pilot/git-upload-pack", "POST", 403],
+    [collection + "/Team/_git/Other%5cPath/git-upload-pack", "POST", 403],
+    [collection + "/_apis/_git/Pilot/git-upload-pack", "POST", 403],
+    [collection + "/Team/_git/Pilot/git-receive-pack", "POST", 403],
     [root + "/git-receive-pack", "POST", 403],
     [root + "/info/refs?service=git-receive-pack", "GET", 403],
     [collection + "/_apis/projects", "POST", 403],
@@ -28,7 +34,7 @@ test("Azure access stays inside the operator collection and grants only reads an
     const request = new Request(url, {method, headers: {authorization: "Basic fixture", cookie: "secret"}});
     assert.equal((await worker.fetch(request, env)).status, status);
   }
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 6);
   assert.ok(calls.every(request => request.redirect === "manual" && !request.headers.has("cookie")
     && request.headers.get("authorization") === "Basic fixture"));
 });

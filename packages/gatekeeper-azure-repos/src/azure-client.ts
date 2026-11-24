@@ -60,6 +60,27 @@ function repoPath(projectId: string, repoId: string): string {
   return `${guid(projectId)}/_apis/git/repositories/${guid(repoId)}`;
 }
 
+function gitNameSegment(name: unknown): string {
+  if (typeof name !== "string" || !name || name === "." || name === ".." ||
+      name.startsWith("_") || /[\\/?#\p{Cc}]|%[\da-f]{2}/iu.test(name)) throw invalidResponse();
+  return encodeURIComponent(name);
+}
+
+// The provider may echo credentials or private ref names in its message. Only surface the
+// operation template, the numeric provider error code and a validated server correlation ID.
+async function badRequestDetails(response: Response): Promise<string> {
+  const details: string[] = [];
+  try {
+    const raw = await readTextCapped(response, 16 * 1024);
+    const message: unknown = raw.trimStart().startsWith("{") ? JSON.parse(raw).message : raw;
+    const code = typeof message === "string" && /^\s*((?:TF|VS)\d{4,8})\b/.exec(message);
+    if (code) details.push(code[1]);
+  } catch { /* Some IIS error responses are HTML or exceed the diagnostic limit. */ }
+  const id = response.headers.get("x-vss-e2eid") ?? response.headers.get("activityid");
+  if (id && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(id)) details.push("request " + id);
+  return details.length ? " " + details.join(", ") + "." : "";
+}
+
 /** Azure's hierarchical Git ACL preserves slash separators and encodes other UTF-16LE code units as hex. */
 function branchSecurityToken(projectId: string, repoId: string, refName: string): string {
   const name = branchName(refName).slice(heads.length);
@@ -87,6 +108,7 @@ export class AzureClient {
   readonly #version: string;
   readonly #authorization: string;
   readonly #network: AzureEnv["AZURE_NETWORK"];
+  #gitRoute?: {restPath: string; base: string};
 
   constructor(env: AzureEnv, pat: string) {
     this.#collection = collectionUrl(env);
@@ -114,16 +136,23 @@ export class AzureClient {
       throw new Error("Could not contact the configured Azure DevOps Server.");
     }
     if (response.status === 200 && !response.redirected) return response;
+    if (response.status === 400) {
+      const route = path.includes("/_git/")
+        ? "{project}/_git/{repository}/" + (body === undefined ? "info/refs" : "git-upload-pack")
+        : path.replace(/\b(?:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}|[\da-f]{40})\b/gi, "{id}");
+      const version = query["api-version"] ? " (API " + query["api-version"] + ")" : "";
+      throw new Error(`Azure DevOps ${request.method} /${route}${version} failed (HTTP 400).${await badRequestDetails(response)}`);
+    }
     await response.body?.cancel().catch(() => undefined);
     if (response.status === 403 || response.status === 404) throw new AzureAccessDenied();
     if (response.status === 401) throw new CredentialsExpiredError("Azure DevOps rejected the personal access token.");
     throw new Error(`Azure DevOps request failed (HTTP ${response.status}).`);
   }
 
-  async #json(path: string, query: Record<string, string> = {}, version = this.#version) {
+  async #json(path: string, query: Record<string, string> = {}, version = this.#version, limit = maxJsonBytes) {
     const response = await this.#send(path, { ...query, "api-version": version }, "application/json");
     try {
-      const data: unknown = JSON.parse(await readTextCapped(response, maxJsonBytes));
+      const data: unknown = JSON.parse(await readTextCapped(response, limit));
       return { data: record(data), nextCursor: response.headers.get("x-ms-continuationtoken") || undefined };
     } catch (error) {
       if (error instanceof ResponseTooLargeError) throw error;
@@ -145,9 +174,9 @@ export class AzureClient {
     return { collectionId: guid(data.instanceId), id, displayName: typeof displayName === "string" ? displayName : id };
   }
 
-  async #page<T>(path: string, query: Record<string, string>, cursor: string | undefined, parse: (value: unknown) => T): Promise<Page<T>> {
+  async #page<T>(path: string, query: Record<string, string>, cursor: string | undefined, parse: (value: unknown) => T, limit = maxJsonBytes): Promise<Page<T>> {
     if (cursor) query.continuationToken = cursor;
-    const { data, nextCursor } = await this.#json(path, query);
+    const { data, nextCursor } = await this.#json(path, query, this.#version, limit);
     if (!Array.isArray(data.value)) throw invalidResponse();
     if (nextCursor && nextCursor === cursor) throw new Error("Azure DevOps returned a repeated continuation token.");
     return { items: data.value.map(parse), nextCursor };
@@ -164,6 +193,31 @@ export class AzureClient {
     return project;
   }
 
+  #repositoryPage(projectId: string, token?: string): Promise<Page<NamedResource>> {
+    const project = guid(projectId);
+    // Azure normally returns every repository in one response. Drop link expansions and retain
+    // only names and IDs before sending the catalog to the human picker.
+    return this.#page(project + "/_apis/git/repositories", {includeLinks: "false", includeAllUrls: "false"}, token, item => {
+      if (guid(record(record(item).project).id) !== project) throw invalidResponse();
+      return namedResource(item);
+    }, 16 * 1024 * 1024);
+  }
+
+  /** Collect the visible repositories in one selected project for searching in the account holder's frame. */
+  async repositoryCatalog(projectId: string): Promise<NamedResource[]> {
+    const items: NamedResource[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await this.#repositoryPage(projectId, cursor);
+      for (const item of page.items) items.push(item);
+      cursor = page.nextCursor;
+      if (cursor && seen.has(cursor)) throw new Error("Azure DevOps repeated a repository page.");
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return items;
+  }
+
   async listRepositories(projectId: string, cursor?: string): Promise<Page<NamedResource>> {
     // The Server repositories endpoint normally returns the whole project in one response.
     // Retain the upstream token as well as our offset for servers that paginate it.
@@ -177,21 +231,22 @@ export class AzureClient {
       token = parts[0] ?? undefined;
       offset = parts[1];
     }
-    const project = guid(projectId);
-    const page = await this.#page(project + "/_apis/git/repositories", {}, token, item => {
-      if (guid(record(record(item).project).id) !== project) throw invalidResponse();
-      return namedResource(item);
-    });
+    const page = await this.#repositoryPage(projectId, token);
     const end = offset + pageSize;
     const next = end < page.items.length ? [token ?? null, end] : page.nextCursor ? [page.nextCursor, 0] : undefined;
     return { items: page.items.slice(offset, end), nextCursor: next && JSON.stringify(next) };
   }
 
-  async getRepository(projectId: string, repoId: string): Promise<NamedResource> {
+  async #repository(projectId: string, repoId: string) {
     const { data } = await this.#json(repoPath(projectId, repoId));
     const repo = namedResource(data);
-    if (repo.id !== guid(repoId) || guid(record(data.project).id) !== guid(projectId)) throw new AzureAccessDenied();
-    return repo;
+    const project = record(data.project);
+    if (repo.id !== guid(repoId) || guid(project.id) !== guid(projectId)) throw new AzureAccessDenied();
+    return {repo, project};
+  }
+
+  async getRepository(projectId: string, repoId: string): Promise<NamedResource> {
+    return (await this.#repository(projectId, repoId)).repo;
   }
 
   #branches(projectId: string, repoId: string, filter: string, cursor?: string): Promise<Page<Branch>> {
@@ -265,7 +320,14 @@ export class AzureClient {
 
   /** Git v0 discovery and upload-pack RPC for one repository. No protocol-v2 negotiation or write service. */
   async gitUploadPack(projectId: string, repoId: string, body?: Uint8Array): Promise<Response> {
-    const base = `${guid(projectId)}/_git/${guid(repoId)}/`;
+    const restPath = repoPath(projectId, repoId);
+    if (this.#gitRoute?.restPath !== restPath) {
+      // Azure's clone route uses names. Resolve them from the pinned GUIDs once per negotiation;
+      // build the path inside the configured collection, never follow a provider-supplied URL.
+      const {repo, project} = await this.#repository(projectId, repoId);
+      this.#gitRoute = {restPath, base: `${gitNameSegment(project.name)}/_git/${gitNameSegment(repo.name)}/`};
+    }
+    const {base} = this.#gitRoute;
     const contentType = "application/x-git-upload-pack-" + (body === undefined ? "advertisement" : "result");
     const response = body === undefined
       ? await this.#send(base + "info/refs", { service: "git-upload-pack" }, contentType)

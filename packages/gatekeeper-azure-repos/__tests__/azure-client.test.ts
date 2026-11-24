@@ -34,6 +34,8 @@ function page(value: unknown[], token?: string) {
 
 const rootTree = { path: "/", gitObjectType: "tree", objectId: tree, commitId: pin };
 const repository = () => Response.json({ id: repo, name: "Repo", project: { id: project } });
+const gitRepository = () => Response.json({id: repo, name: "Pilot .NET", project: {id: project, name: "Takım A"},
+  remoteUrl: "https://elsewhere.test/_git/Pilot"});
 
 describe("Azure DevOps Server", () => {
   it("authenticates against the fixed collection and uses the provider's stable identity", async () => {
@@ -95,6 +97,27 @@ describe("Azure DevOps Server", () => {
     await expect(wrongRoot.client.verifyPinned(project, repo, branch, pin)).rejects.toThrow("Invalid");
     const malformed = fixture(repository(), page(["true"]));
     await expect(malformed.client.verifyPinned(project, repo, branch, pin)).rejects.toThrow("Invalid");
+  });
+
+  it("collects compact names across upstream pages and catches cyclic continuations", async () => {
+    const row = {id: repo, name: "Leaf", project: {id: project}, remoteUrl: "https://unused.test"};
+    const success = fixture(page([], "next"), page([row]));
+    expect(await success.client.repositoryCatalog(project)).toEqual([{id: repo, name: "Leaf"}]);
+    expect(new URL(success.requests[1].url).searchParams.get("continuationToken")).toBe("next");
+    const cycle = fixture(page([], "one"), page([], "two"), page([], "one"));
+    await expect(cycle.client.repositoryCatalog(project)).rejects.toThrow(/repeated/i);
+    await expect(fixture(page([{...row, project: {id: user}}])).client.repositoryCatalog(project)).rejects.toThrow();
+  });
+
+  it("identifies a failing Git transfer and its Azure reference without including upstream messages", async () => {
+    const code = "f8e488c7-806b-4ea2-a5d6-808e03df52ba";
+    const {client} = fixture(gitRepository(), Response.json({message: "TF401019: " + pat}, {status: 400, headers: {"x-vss-e2eid": code}}));
+    const err = await client.gitUploadPack(project, repo, Uint8Array.of(0)).catch((error: Error) => error);
+    expect(String(err)).toMatch(/git-upload-pack.*HTTP 400/i);
+    expect(String(err)).toContain(code);
+    expect(String(err)).toContain("TF401019");
+    expect(String(err)).not.toContain(pat);
+    expect(String(err)).not.toContain("Pilot");
   });
 
   it("does not select a prefix match, even on subsequent ref pages", async () => {
@@ -166,20 +189,35 @@ describe("Azure DevOps Server", () => {
 
   it("uses only v0 smart HTTP upload-pack under the fixed repository and checks the service MIME type", async () => {
     const { client, requests } = fixture(
+      gitRepository(),
       new Response("discover", { headers: { "content-type": "application/x-git-upload-pack-advertisement" } }),
       new Response("pack", { headers: { "content-type": "application/x-git-upload-pack-result" } }),
       new Response("sign in", { headers: { "content-type": "text/html" } }),
     );
-    const base = collection + "/" + project + "/_git/" + repo;
+    const base = collection + "/Tak%C4%B1m%20A/_git/Pilot%20.NET";
     expect(await (await client.gitUploadPack(project, repo)).text()).toBe("discover");
     expect(await (await client.gitUploadPack(project, repo, Uint8Array.of(1, 2))).text()).toBe("pack");
-    expect(requests[0].url).toBe(base + "/info/refs?service=git-upload-pack");
-    expect(requests[1].url).toBe(base + "/git-upload-pack");
-    expect(requests[1].method).toBe("POST");
-    expect(requests[1].headers.get("content-type")).toBe("application/x-git-upload-pack-request");
+    expect(requests[0].url).toBe(collection + "/" + project + "/_apis/git/repositories/" + repo + "?api-version=7.0");
+    expect(requests[1].url).toBe(base + "/info/refs?service=git-upload-pack");
+    expect(requests[2].url).toBe(base + "/git-upload-pack");
+    expect(requests[2].method).toBe("POST");
+    expect(requests[2].headers.get("content-type")).toBe("application/x-git-upload-pack-request");
     expect(requests.every(r => !r.headers.has("Git-Protocol"))).toBe(true);
     await expect(client.gitUploadPack(project, repo)).rejects.toThrow();
     await expect(client.gitUploadPack("../other", repo)).rejects.toThrow();
-    expect(requests).toHaveLength(3);
+    expect(requests).toHaveLength(4);
+  });
+
+  it("rejects mismatched repository identity and unsafe Git paths before sending a Git request", async () => {
+    for (const data of [
+      {id: user, name: "Repo", project: {id: project, name: "Team"}},
+      {id: repo, name: "Repo", project: {id: user, name: "Team"}},
+      {id: repo, name: "..", project: {id: project, name: "Team"}},
+      {id: repo, name: "Repo", project: {id: project, name: "%2fother"}},
+    ]) {
+      const {client, requests} = fixture(Response.json(data));
+      await expect(client.gitUploadPack(project, repo)).rejects.toThrow();
+      expect(requests).toHaveLength(1);
+    }
   });
 });

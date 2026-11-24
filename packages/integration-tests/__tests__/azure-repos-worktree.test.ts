@@ -20,6 +20,7 @@ const worker = "gatekeeper-azure-repos";
 const vendor = "azure_repos";
 const baseUrl = "https://workshop.test/gatekeeper/azure-repos";
 const collection = "https://azure.example.test/tfs/Engineering";
+const gitPath = "/Engineering/_git/Pilot";
 const project = "172cf866-bbf3-4063-a89a-55e18d0a55f1";
 const repo = "d996ae88-74d5-4426-99d9-048ceecaf6b5";
 const refName = "refs/heads/release/legacy";
@@ -63,6 +64,9 @@ function createFixture() {
   let tip = pin;
   const root = { path: "/", gitObjectType: "tree", commitId: pin, objectId: git("rev-parse", pin + "^{tree}") };
   const requests: string[] = [];
+  const uploadPack = (...args: string[]) => ["-c", "uploadpack.allowReachableSHA1InWant=true",
+    "upload-pack", "--stateless-rpc", ...args, directory.path];
+  const gitEnv = { ...process.env, GIT_PROTOCOL: "version=0" };
   let observerAllowed = false;
   const handler: Handler = async (url, method, headers, request) => {
     if (!url.href.startsWith(collection + "/")) return null;
@@ -105,10 +109,15 @@ function createFixture() {
           return Response.json({ count: items.length, value: items });
         }
       }
+      if (path === gitPath + "/info/refs" && url.search === "?service=git-upload-pack") {
+        const refs = execFileSync("git", uploadPack("--advertise-refs"), {env: gitEnv});
+        const body = Buffer.concat([Buffer.from("001e# service=git-upload-pack\n0000"), refs]);
+        return new Response(body, {headers: {"content-type": "application/x-git-upload-pack-advertisement"}});
+      }
     }
-    if (path === `/${project}/_git/${repo}/git-upload-pack` && method === "POST") {
-      const output = execFileSync("git", ["-c", "uploadpack.allowFilter=false", "upload-pack", "--stateless-rpc", directory.path],
-        { input: Buffer.from(await request.arrayBuffer()), env: { ...process.env, GIT_PROTOCOL: "version=0" } });
+    if (path === gitPath + "/git-upload-pack" && method === "POST") {
+      const input = Buffer.from(await request.arrayBuffer());
+      const output = execFileSync("git", uploadPack(), {input, env: gitEnv});
       return new Response(output, { headers: { "content-type": "application/x-git-upload-pack-result" } });
     }
     return null;
@@ -172,7 +181,7 @@ it("opens the chosen Azure revision and reads its .NET Framework evidence in a W
   const frame = await api.startResourceConfigurator(account.id, "branch");
   using picker = frame.ui as unknown as RpcStub<BranchConfiguratorRpc>;
   expect((await picker.listProjects(null)).items).toContainEqual({ id: project, name: "Engineering" });
-  expect((await picker.listRepositories(project, null)).items.map(item => item.name)).toEqual(["Other", "Pilot"]);
+  expect((await picker.repositoryCatalog(project)).map(item => item.name)).toEqual(["Other", "Pilot"]);
   const branches = (await picker.listBranches(project, repo, null)).items;
   const selected = branches.find(branch => branch.refName === refName);
   if (!selected || selected.commitId !== fixture.pin) throw new Error("Expected the pilot release branch.");
@@ -224,8 +233,11 @@ it("opens the chosen Azure revision and reads its .NET Framework evidence in a W
   }
   expect(JSON.stringify(model.requests)).not.toContain("v4.8.1");
   expect(JSON.stringify(model.requests)).not.toContain(pat);
-  expect(fixture.requests).toContain(`POST /${project}/_git/${repo}/git-upload-pack`);
-  expect(fixture.requests.every(request => request.startsWith("GET ") || request === `POST /${project}/_git/${repo}/git-upload-pack`)).toBe(true);
+  const gitPost = "POST " + gitPath + "/git-upload-pack";
+  expect(fixture.requests.filter(request => request.includes("/_git/")).slice(0, 3)).toEqual([
+    "GET " + gitPath + "/info/refs", gitPost, gitPost,
+  ]);
+  expect(fixture.requests.every(request => request.startsWith("GET ") || request === gitPost)).toBe(true);
   expect(fixture.refs()).toBe(initialRefs);
   const history = await loadAllChatHistory(before => ws.getChatHistory(chat, before));
   expect(history).toContainEqual(expect.objectContaining({type: "message", message: answer}));

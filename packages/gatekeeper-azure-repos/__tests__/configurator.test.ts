@@ -22,6 +22,7 @@ const NEW_COMMIT = "2".repeat(40);
 function open() {
   let values: BranchConfiguratorValues = { ...configurator.initial };
   const ui = {
+    repositoryCatalog: vi.fn(async (_project: string) => [{ id: REPOSITORY, name: " Accounts Service" }]),
     listProjects: vi.fn(async (_cursor: string | null) => ({ items: [{ id: PROJECT, name: " Project / Finance" }] })),
     listRepositories: vi.fn(async (_project: string, _cursor: string | null) =>
       ({ items: [{ id: REPOSITORY, name: " Accounts Service" }] })),
@@ -43,7 +44,7 @@ function open() {
     ui, render, values: () => values,
     ready: () => configurator.isReady({ values }),
     collect: () => configurator.resourceUrl({ values, ui }),
-    list: (cursor: string | null = null) => controls.picker!.loadItems({ parentId: controls.picker!.root.id, query: "", cursor }),
+    list: (cursor: string | null = null, query = "") => controls.picker!.loadItems({ parentId: controls.picker!.root.id, query, cursor }),
     choose(item: ConfiguratorUIHierarchyItem) {
       controls.picker!.onChange(item.id, item);
       render();
@@ -62,6 +63,38 @@ function open() {
 }
 
 describe("choosing a pinned Azure branch", () => {
+  it("searches and pages the whole project without redownloading 5,200 repository names", async () => {
+    const frame = open();
+    frame.choose((await frame.list()).items[0]!);
+    const repos = Array.from({length: 5200}, (_, i) => ({id: String(i), name: i >= 5000 ? "Finance-" + i : "Other-" + i}));
+    frame.ui.repositoryCatalog.mockResolvedValue(repos);
+    expect(controls.picker?.searchPlaceholder).toBeTruthy();
+    expect((await frame.list()).items).toHaveLength(100);
+    const first = await frame.list(null, " FINANCE ");
+    expect(first.items).toHaveLength(100);
+    expect(first.items[0]?.id).toBe("5000");
+    const last = await frame.list(first.nextCursor!, "finance");
+    expect(last.items.at(-1)?.id).toBe("5199");
+    expect(last.nextCursor).toBeFalsy();
+    expect((await frame.list(null, "absent")).notice).toMatch(/no matching/i);
+    expect(frame.ui.repositoryCatalog).toHaveBeenCalledTimes(1);
+    frame.choose(last.items.at(-1)!);
+    expect(frame.values().repositoryId).toBe("5199");
+  });
+
+  it("retries a failed catalog and drops it when the project changes", async () => {
+    const frame = open();
+    frame.choose((await frame.list()).items[0]!);
+    frame.ui.repositoryCatalog.mockRejectedValueOnce(new Error("Azure unavailable"));
+    await expect(frame.list()).rejects.toThrow("Azure unavailable");
+    expect((await frame.list(null, "Accounts")).items).toHaveLength(1);
+    controls.notices.find(n => n.action?.label === "Change project")!.action!.onClick();
+    frame.render();
+    frame.choose({id: "project-two", title: "Another", kind: "leaf"});
+    frame.ui.repositoryCatalog.mockResolvedValue([]);
+    expect((await frame.list()).items).toEqual([]);
+    expect(frame.ui.repositoryCatalog).toHaveBeenLastCalledWith("project-two");
+  });
   it("requires an explicit branch, forwards the cursor, and confirms only the chosen tip", async () => {
     const frame = open();
     expect(configurator.initialValuesFromResourceUrl()).toEqual({});

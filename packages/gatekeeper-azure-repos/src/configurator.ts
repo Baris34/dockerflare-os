@@ -19,6 +19,10 @@ export class AzureBranchConfiguratorUI extends RpcTarget implements BranchConfig
     return (await this.#getClient()).listProjects(cursor ?? undefined);
   }
 
+  async repositoryCatalog(projectId: string) {
+    return (await this.#getClient()).repositoryCatalog(projectId);
+  }
+
   async listRepositories(projectId: string, cursor: string | null) {
     return (await this.#getClient()).listRepositories(projectId, cursor ?? undefined);
   }
