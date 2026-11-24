@@ -5383,6 +5383,8 @@ export interface Overseer extends RpcTarget {
 
 /** Metadata about one chat in a workspace. */
 export type AiChatMetadata = {
+  /** Identity that opened the chat. Older workspaces may only have the first message's author. */
+  startedBy?: Pick<AiChatAuthorInfo, "type" | "id">,
   id: number,
   title: string,
   started: Date,
@@ -6250,6 +6252,8 @@ export type AiChatMessageBody = {
 
   /** Lifecycle state. Starts "pending"; set by the user's accept/deny. */
   state: "pending" | "accepted" | "denied";
+  /** Authenticated profile that decided this card, when recorded. */
+  decidedBy?: string;
 
   /**
    * Once accepted, the id of the created gatekeeper. The resource is surfaced to the agent as a
@@ -6284,6 +6288,8 @@ export type AiChatMessageBody = {
 
   /** Starts "pending"; set by the user's decision. */
   state: "pending" | "approved" | "denied";
+  /** Authenticated profile that decided this URL approval, when recorded. */
+  decidedBy?: string;
 };
 
 /**

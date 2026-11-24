@@ -4496,6 +4496,7 @@ class OverseerImpl implements AgentHooks {
       this.storage.chatMeta.put({
         id: chatId,
         title: `Update from blueprint: ${metadata.title}`,
+        startedBy: {type: author.type, id: author.id},
         started: timestamp,
         lastActive: timestamp,
         chatToken: crypto.randomUUID(),
@@ -7961,6 +7962,7 @@ class OverseerImpl implements AgentHooks {
       let meta: AiChatMetadata = {
         id: chatId,
         title: "New Chat",   // filled in later by AI
+        startedBy: {type: userMeta.profile.type, id: userMeta.profile.id},
         started: timestamp,
         lastActive: timestamp,
         chatToken: crypto.randomUUID(),
@@ -8513,6 +8515,7 @@ class OverseerImpl implements AgentHooks {
               sessionAffinity,
               userGateway: byokRouting,
               metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
+              recordOsDashboardCall: this.#osDashboardCallRecorder(chatId, aiModel.config.model, "chat"),
             });
         turn.setModel(chosenModel.model);
 
@@ -9022,9 +9025,11 @@ class OverseerImpl implements AgentHooks {
   // fall back to a deterministic name.
   async generateBindingName(
       subject: string, takenNames: Set<string>,
-      quick: {config: AiModelConfig, initiator: AiChatAuthorInfo}): Promise<string | undefined> {
+      quick: {config: AiModelConfig, initiator: AiChatAuthorInfo}, chatId?: number): Promise<string | undefined> {
     try {
-      let model = getModel(this.env, quick.config, quick.initiator);
+      let model = getModel(this.env, quick.config, quick.initiator, {
+        recordOsDashboardCall: chatId === undefined ? undefined : this.#osDashboardCallRecorder(chatId, quick.config.model, "binding-name"),
+      });
       let result = await completeText(model, {
         signal: AbortSignal.timeout(10_000),
         prompt:
@@ -9307,7 +9312,7 @@ class OverseerImpl implements AgentHooks {
           let existing = nameByTarget.get(target);
           if (existing !== undefined) return existing;
         }
-        let name = quick ? await this.generateBindingName(subject, taken, quick) : undefined;
+        let name = quick ? await this.generateBindingName(subject, taken, quick, chatId) : undefined;
         if (name === undefined) {
           let suggested: string | undefined;
           if (target !== undefined && this.storage.gatekeepers.get(target)) {
@@ -9957,6 +9962,7 @@ class OverseerImpl implements AgentHooks {
     try {
       let model = getModel(this.env, modelConfig, initiator, {
         metadata: { source: "thread-title", gadgetId: this.ctx.id.toString(), chatId },
+        recordOsDashboardCall: this.#osDashboardCallRecorder(chatId, modelConfig.model, "thread-title"),
       });
 
       let result = await completeText(model, {
@@ -10014,6 +10020,7 @@ class OverseerImpl implements AgentHooks {
 
       let model = getModel(this.env, modelConfig, initiator, {
         metadata: { source: "gadget-title", gadgetId: this.ctx.id.toString(), chatId },
+        recordOsDashboardCall: this.#osDashboardCallRecorder(chatId, modelConfig.model, "gadget-title"),
       });
 
       let gadgetTitle = await completeText(model, {
@@ -10050,7 +10057,7 @@ class OverseerImpl implements AgentHooks {
       return;
     }
 
-    for (let {modelData, ...msg} of msgs) {
+    for (let {modelData, osDashboardRequestId, ...msg} of msgs) {
       if (msg.type === "changes") {
         // (A message's `pins` need no validation or mirroring here: pins are validated and
         // mirrored into the chat's code base when the establishing row is *appended* -- see
@@ -10128,7 +10135,7 @@ class OverseerImpl implements AgentHooks {
       // (atomic under the output gate), so the two can never disagree. Destructured off `msg`
       // above so it can't leak into the client-visible record.
       if (modelData) {
-        this.storage.chatModelData.put({chatId, sequence, message: modelData});
+        this.storage.chatModelData.put({chatId, sequence, message: modelData, ...(osDashboardRequestId && {osDashboardRequestId})});
       }
     }
 
@@ -10161,6 +10168,18 @@ class OverseerImpl implements AgentHooks {
       // surface a log id): fall back to the caller's catalog-priced estimate.
       this.#addChatCost(chatId, usage.cost.total, isActivity);
     }
+  }
+
+  #osDashboardCallRecorder(chatId: number, model: string, operation: string) {
+    if (!this.env.OS_DASHBOARD_AI_GATEWAY_ROOT) return undefined;
+    return (id: string, timestamp: number, status: number) => {
+      const sql = this.ctx.storage.sql;
+      if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='seyir_model_call'").toArray().length) {
+        sql.exec("ALTER TABLE seyir_model_call RENAME TO os_dashboard_model_call");
+      }
+      sql.exec("CREATE TABLE IF NOT EXISTS os_dashboard_model_call(request_id TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, ts INTEGER NOT NULL, model TEXT NOT NULL, operation TEXT NOT NULL, status INTEGER NOT NULL)");
+      sql.exec("INSERT OR IGNORE INTO os_dashboard_model_call VALUES(?,?,?,?,?,?)", id, chatId, timestamp, model, operation, status);
+    };
   }
 
   getChatModelData(chatId: number, sequence: number): StoredAssistantMessage | undefined {
@@ -13496,6 +13515,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     msg.state = "accepted";
+    msg.decidedBy = this.clientProfileId;
     // The gatekeeper is surfaced to the agent as a named binding in the chat's env, under the
     // name recorded on the request (see the connectionRequest history case in agent.ts).
     msg.gatekeeperId = result.gatekeeperId;
@@ -13514,6 +13534,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     msg.state = "denied";
+    msg.decidedBy = this.clientProfileId;
     msg.timestamp = this.impl.getChatTimestamp();
     this.impl.storage.chats.put(msg);  // fires the subscriber update() → re-delivers the card
     this.impl.resumeAgentAfterDecision(msg.chatId, requestId);
@@ -13538,6 +13559,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let msg = this.#findWebFetchRequest(requestId);
     if (msg.state !== "pending") throw new Error(`Web fetch request is not pending: ${requestId}`);
     msg.state = state;
+    msg.decidedBy = this.clientProfileId;
     msg.timestamp = this.impl.getChatTimestamp();
     this.impl.storage.chats.put(msg);  // fires the subscriber update() → re-delivers the card
     this.impl.resumeAgentAfterDecision(msg.chatId, requestId);
@@ -15866,6 +15888,7 @@ class AgentSpawnerQueueImpl extends ApprovalQueueImpl implements AgentSpawnerQue
       lastActive: timestamp,
       chatToken: crypto.randomUUID(),
       spawnerName: config.displayName,
+      startedBy: {type: "gadget", id: "spawner/" + this.gatekeeperId},
       spawnerId: this.gatekeeperId,
     };
     this.impl.storage.chatMeta.put(meta);

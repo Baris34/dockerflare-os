@@ -15,7 +15,8 @@ COPY docker/azure-network.mjs docker/model-transport.mjs docker/
 RUN pnpm install --offline --frozen-lockfile
 
 FROM source AS web-build
-RUN VITE_CF_ACCESS_MODE=false pnpm exec vp run --no-cache -F @gadgets/workshop-frontend build:assets
+ARG OS_DASHBOARD_PORT=
+RUN VITE_OS_DASHBOARD_PORT="$OS_DASHBOARD_PORT" VITE_CF_ACCESS_MODE=false pnpm exec vp run --no-cache -F @gadgets/workshop-frontend build:assets
 
 FROM nginxinc/nginx-unprivileged:stable-alpine AS web
 COPY docker/web.conf /etc/nginx/conf.d/default.conf
@@ -34,7 +35,7 @@ FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS runtime-files
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && test -s /etc/ssl/certs/ca-certificates.crt && flock --version \
-    && install -d -m 0700 /volume-root/data
+    && install -d -m 0700 /volume-root/data /volume-root/os-dashboard-audit
 
 FROM node:24-bookworm-slim AS workshop
 ARG TARGETARCH
@@ -46,6 +47,7 @@ COPY --from=worker-build /out/native/${TARGETARCH}/workerd /usr/local/bin/worker
 COPY --from=worker-build /out/workers/ ./workers/
 COPY --from=worker-build /out/storage/ ./storage/
 COPY docker/workshop.mjs docker/model-transport.mjs docker/azure-network.mjs ./docker/
+COPY docker/os-dashboard-export/*.mjs /os-dashboard-export/
 COPY packages/workshop-shared/src/model-api-root.ts ./packages/workshop-shared/src/
 USER node
 VOLUME /data

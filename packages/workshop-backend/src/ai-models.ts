@@ -73,6 +73,7 @@ type GatewayMetadataContext = {
 };
 
 type ModelRoutingOptions = {
+  recordOsDashboardCall?: (id: string, timestamp: number, status: number) => void;
   sessionAffinity?: string;
   userGateway?: UserGatewayRouting;
   metadata?: GatewayMetadataContext;
@@ -123,7 +124,7 @@ export type ModelHandle = {
    * SDK-level failure leaves this undefined), so consumers must read it right after the request
    * they care about completes. Turns run requests sequentially, so this is safe.
    */
-  lastResponse?: { status: number; aiGatewayLogId?: string; routedModel?: string };
+  lastResponse?: { status: number; aiGatewayLogId?: string; routedModel?: string; osDashboardRequestId?: string };
 
   /**
    * The most recent request `stream` sent with prompt caching on, once its response ends, if the
@@ -516,6 +517,7 @@ function getHeader(headers: Record<string, string>, name: string): string | unde
 }
 
 type HandleArgs = {
+  osDashboardAudit?: boolean;
   model: Model<Api>;
   // Provider auth: a plain API key (pi turns it into the SDK's native auth) and/or headers.
   // A null header value suppresses a default header ({Authorization: null, "x-api-key": null}
@@ -614,6 +616,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
           received = {
             status: response.status,
             aiGatewayLogId: getHeader(response.headers, "cf-aig-log-id"),
+            osDashboardRequestId: args.osDashboardAudit ? osDashboardId(getHeader(response.headers, "x-os-dashboard-request-id")) : undefined,
             routedModel: getHeader(response.headers, "cf-aig-routed-model"),
           };
           handle.lastResponse = received;
@@ -822,7 +825,7 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
     return getModelViaGateway(gwConfig, config, initiator, options);
   }
 
-  return getModelDirect(env, config, options.sessionAffinity);
+  return getModelDirect(env, config, options.sessionAffinity, options.recordOsDashboardCall);
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -980,9 +983,13 @@ function directAuth(config: AiModelConfig, keyHeader: string): Pick<HandleArgs, 
       : { apiKey: config.apiToken, headers: config.extraHeaders };
 }
 
+function osDashboardId(value?: string | null): string | undefined {
+  return value && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value) ? value : undefined;
+}
+
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
 function getModelDirect(env: Cloudflare.Env, config: AiModelConfig,
-                        sessionAffinity?: string): ModelHandle {
+                        sessionAffinity?: string, recordCall?: ModelRoutingOptions["recordOsDashboardCall"]): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
@@ -1049,6 +1056,8 @@ function getModelDirect(env: Cloudflare.Env, config: AiModelConfig,
       });
     case "openai-compatible": {
       const { baseUrl, fetch } = compatibleModelEndpoint(env, config.apiUrl);
+      // Only trust response identifiers issued by the operator-selected private gateway.
+      const audit = env.OS_DASHBOARD_AI_GATEWAY_ROOT === baseUrl ? recordCall : undefined;
       return makeHandle({
         model: {
           id: config.model, name: config.model, api: "openai-completions",
@@ -1057,7 +1066,14 @@ function getModelDirect(env: Cloudflare.Env, config: AiModelConfig,
           compat: { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" },
         },
         ...directAuth(config, "Authorization"),
-        fetch,
+        osDashboardAudit: !!audit,
+        fetch: audit ? async (input, init) => {
+          const timestamp = Date.now();
+          const response = await fetch(input, init);
+          const id = osDashboardId(response.headers.get("x-os-dashboard-request-id"));
+          if (id) audit(id, timestamp, response.status);
+          return response;
+        } : fetch,
       });
     }
     case "ollama":

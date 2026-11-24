@@ -8,6 +8,7 @@ export default {
       return new Response("Unknown inference target", { status: 403 });
     }
     const headers = new Headers();
+    if (request.url === env.OS_DASHBOARD_TARGET) headers.set("x-os-dashboard-accounting", "workshop");
     for (const name of ["authorization", "content-type", "accept"]) {
       if (request.headers.has(name)) headers.set(name, request.headers.get(name));
     }

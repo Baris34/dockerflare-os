@@ -106,6 +106,9 @@ function appWorker(bundle, options, selectedVendors) {
     }
     if (options.roots.length) {
       vars.SELF_HOSTED_MODEL_BASE_URLS = json(options.roots);
+      if (options.env.OS_DASHBOARD_AI_GATEWAY_ROOT && options.roots.includes(options.env.OS_DASHBOARD_AI_GATEWAY_ROOT)) {
+        vars.OS_DASHBOARD_AI_GATEWAY_ROOT = options.env.OS_DASHBOARD_AI_GATEWAY_ROOT;
+      }
       bindings.push({ name: "SELF_HOSTED_MODEL", service: "model-transport" });
     }
   } else if (name.startsWith("gatekeeper-")) {
@@ -192,6 +195,7 @@ export function runtimeServices(bundles, options) {
         modules: [{ name: "model.js", esModule: embed("/docker/model-transport.mjs") }],
         bindings: [
           { name: "TARGETS", json: json(options.roots.map(root => root + "/chat/completions")) },
+          { name: "OS_DASHBOARD_TARGET", text: options.env.OS_DASHBOARD_AI_GATEWAY_ROOT ? options.env.OS_DASHBOARD_AI_GATEWAY_ROOT + "/chat/completions" : "" },
           { name: "MODEL_NETWORK", service: "model-network" },
         ],
       },
@@ -241,11 +245,19 @@ async function main() {
   const config = renderConfig(bundles, options);
   for (const dir of ["objects", "kv", "r2"]) await mkdir(join("/data", dir), { recursive: true });
   const temp = await mkdtemp(join(tmpdir(), "dockerflare-"));
+  let exporter, retry;
+  function startExporter() {
+    exporter = spawn(process.execPath, ["/os-dashboard-export/export.mjs"], { stdio: "inherit" });
+    exporter.once("exit", () => {
+      if (exporter) retry = setTimeout(startExporter, 5000);
+    });
+  }
   try {
     const path = join(temp, "config.capnp");
     await writeFile(path, config, { mode: 0o600 });
     const child = spawn("flock", ["--nonblock", "--no-fork", "/data/.workshop.lock",
       "workerd", "serve", "--experimental", "-I/app", path], { stdio: "inherit" });
+    if (process.env.OS_DASHBOARD_WORKSHOP_AUDIT_FILE) startExporter();
     for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
     const exitCode = await new Promise((resolve, reject) => {
       child.once("error", reject);
@@ -253,6 +265,9 @@ async function main() {
     });
     process.exitCode = exitCode;
   } finally {
+    clearTimeout(retry);
+    exporter?.kill();
+    exporter = undefined;
     await rm(temp, { recursive: true, force: true });
   }
 }

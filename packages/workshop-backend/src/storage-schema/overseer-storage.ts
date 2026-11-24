@@ -913,6 +913,7 @@ export type StoredAssistantMessage = Omit<AssistantMessage, "content"> & {
 // One agent step's model-facing snapshot (see StoredAssistantMessage), keyed by the
 // chatId.sequence of the step's "message" record.
 type ChatModelDataRecord = {
+  osDashboardRequestId?: string;
   chatId: number;
   sequence: number;
   message: StoredAssistantMessage;

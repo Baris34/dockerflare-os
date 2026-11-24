@@ -26,6 +26,16 @@ import AdminPage from './AdminPage'
 
 beforeEach(() => vi.clearAllMocks())
 
+const emptySettings: AdminSettingsView = {
+  signupsEnabled: true, userSearchEnabled: false, snapshotSharingEnabled: true, siteName: '',
+  instanceInstructions: '',
+  announcement: '', banner: { text: '', color: 'neutral' }, accentColor: '', formats: [],
+  restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
+  adminWorkspaceAccess: { effective: 'metadata', chosen: 'metadata', max: 'metadata' },
+  adminAuditRetentionDays: { effective: 30, chosen: 30, min: 30 },
+  resourceVendors: [],
+}
+
 it.each([
   { outcome: 'succeeds', refreshFails: false },
   { outcome: 'fails', refreshFails: true },
@@ -42,15 +52,7 @@ it.each([
     autoProvisions: false, resources: [...current,
       { urlPattern: retired, title: 'Unavailable resource type', description: 'Old restriction', enabled: false }],
   } satisfies AdminResourceVendor
-  const settings: AdminSettingsView = {
-    signupsEnabled: true, userSearchEnabled: false, snapshotSharingEnabled: true, siteName: '',
-    instanceInstructions: '',
-    announcement: '', banner: { text: '', color: 'neutral' }, accentColor: '', formats: [],
-    restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
-    adminWorkspaceAccess: { effective: 'metadata', chosen: 'metadata', max: 'metadata' },
-    adminAuditRetentionDays: { effective: 30, chosen: 30, min: 30 },
-    resourceVendors: [vendor],
-  }
+  const settings = { ...emptySettings, resourceVendors: [vendor] }
   const getSettings = vi.fn<AdminApi['getSettings']>().mockResolvedValueOnce(settings).mockResolvedValue({ ...settings,
     resourceVendors: [{ ...vendor, resources: current.map(r => ({ ...r, enabled: true })) }],
   })
@@ -80,5 +82,32 @@ it.each([
     await act(async () => { root.unmount() })
     container.remove()
     vi.unstubAllGlobals()
+  }
+})
+
+it.each(['4321', '', '65536'])('links to a configured local OS Dashboard for port "%s"', async (port) => {
+  vi.stubEnv('VITE_OS_DASHBOARD_PORT', port)
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  getAdminApi.mockResolvedValue({
+    getSettings: async () => emptySettings,
+    getUpdateStatus: async () => null,
+  })
+  const container = document.createElement('div')
+  const root = createRoot(container)
+  try {
+    await act(async () => { root.render(<AdminPage />) })
+    expect(container.querySelector('h1')?.textContent).toBe('Admin')
+    const link = [...container.querySelectorAll('a')].find(a => a.textContent === 'OS Dashboard')
+    if (port === '4321') {
+      expect(link?.hostname).toBe(window.location.hostname)
+      expect(link?.port).toBe(port)
+      expect(link?.hash).toBe('#workshop')
+    } else {
+      expect(link).toBeUndefined()
+    }
+  } finally {
+    await act(async () => { root.unmount() })
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
   }
 })

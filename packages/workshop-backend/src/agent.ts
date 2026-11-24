@@ -315,6 +315,7 @@ async function describeBinding(
  */
 export type AiChatMessageBodyWithModelData = AiChatMessageBody & {
   modelData?: StoredAssistantMessage;
+  osDashboardRequestId?: string;
 };
 
 /** What a user message was focused on, as the server stamped it (see AiChatMessageBody.focus). */
@@ -4521,6 +4522,7 @@ async function runAgentPass(
           // The model-facing snapshot rides along for the overseer to persist beside the display
           // record.
           msg.modelData = makeStoredAssistantMessage(message);
+          msg.osDashboardRequestId = handle.lastResponse?.osDashboardRequestId;
           msgs.push(msg);
         }
 

@@ -97,3 +97,9 @@ docker run --rm -i --network none --user 0 --entrypoint tar \
 İki imajı build ettikten sonra Linux’ta, deponun pnpm bağımlılıkları kurulmuş bir checkout’tan `node docker/test/smoke.mjs dockerflare/web:local dockerflare/workshop:local` çalıştır. Test kendi geçici ağını, volume’larını ve kontrollü bir model endpoint’ini oluşturur. WebSocket, akışlı araç çağrısı, Context, zamanlayıcı, yeniden başlatma ve yedekten geri dönüşü sınar.
 
 Docker Engine 29.9.3 ile Linux/amd64 üzerinde iki imaj uçtan uca test edildi. Chromium’da ilk kayıt, kurulum sihirbazı ve özel modelin kaydedilip sayfa yenilendiğinde tekrar görünmesi de doğrulandı. Linux/arm64 için üretilen iki imaj QEMU emülasyonunda başlatıldı. ARM64 nginx üzerinden arayüz ve Workshop WebSocket bağlantısı açıldı, üç başlangıç şablonu yüklendi.
+
+## OS Dashboard’de sohbet denetimi
+
+Workshop verisini `/data` altında tut. Aynı birimi ikinci kez salt okunur olarak `/os-dashboard-source` altına, ayrı bir adlandırılmış birimi de `/os-dashboard-audit` altına yazılabilir olarak bağla. Workshop konteynerinde `OS_DASHBOARD_WORKSHOP_OBJECTS=/os-dashboard-source/objects` ve `OS_DASHBOARD_WORKSHOP_AUDIT_FILE=/os-dashboard-audit/workshop.sqlite` ayarlarıyla sohbet özetleri yaklaşık beş saniyede bir güncellenir. OS Dashboard paneline yalnız özet birimini `/os-dashboard-audit:ro` olarak bağla.
+
+Özel model uç noktası OS Dashboard AI Gateway’inden geçiyorsa `OS_DASHBOARD_AI_GATEWAY_ROOT` değerini Workshop sağlayıcısındaki izinli API köküyle aynı yap. Örneğin ayrı AI Gateway konteynerinde bu kök `http://os-dashboard-ai-gateway:4322/v1` olabilir. Workshop model isteği kimliğini kaydeder. OS Dashboard aynı kimliği kullanarak ana model ve etkin guard maliyetlerini sohbete ekler.

@@ -492,10 +492,21 @@ export default function AdminPage() {
     )
   }
 
+  const dashboardPort = Number(import.meta.env.VITE_OS_DASHBOARD_PORT)
+  const dashboardHost = ['localhost', '[::1]'].includes(window.location.hostname)
+    ? window.location.hostname : '127.0.0.1'
   return (
     <div className="mx-auto w-full max-w-[1040px] px-4 sm:px-8 py-8 space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-kumo-default">Admin</h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-2xl font-semibold text-kumo-default">Admin</h1>
+          {Number.isInteger(dashboardPort) && dashboardPort > 0 && dashboardPort <= 65535 && (
+            <a href={`http://${dashboardHost}:${dashboardPort}/#workshop`}
+              target="_blank" rel="noopener noreferrer" className="text-sm underline text-kumo-brand">
+              OS Dashboard
+            </a>
+          )}
+        </div>
         <p className="text-sm text-kumo-subtle mt-1">
           Deployment-wide settings. Changes apply to all users on their next connection.
         </p>
