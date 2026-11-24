@@ -7,7 +7,7 @@ const collection = "https://devops.example.test/tfs/Engineering";
 const id = "00000001-0002-0003-0004-000000000005";
 const root = collection + "/" + id + "/_git/" + id;
 
-test("Azure access stays inside the operator collection and grants only reads and upload-pack", async () => {
+test("Azure access stays inside the operator collection and only writes through receive-pack and PR creation", async () => {
   const calls = [];
   const env = {COLLECTION: collection, AZURE_UPSTREAM: {fetch: request => {
     calls.push(request);
@@ -24,8 +24,16 @@ test("Azure access stays inside the operator collection and grants only reads an
     [collection + "/Team/_git/Other%5cPath/git-upload-pack", "POST", 403],
     [collection + "/_apis/_git/Pilot/git-upload-pack", "POST", 403],
     [collection + "/Team/_git/Pilot/git-receive-pack", "POST", 403],
-    [root + "/git-receive-pack", "POST", 403],
-    [root + "/info/refs?service=git-receive-pack", "GET", 403],
+    [collection + "/Team/_git/Pilot/info/refs?service=git-receive-pack", "GET", 403],
+    [collection + "/Team/_git/Pilot/vsts/info", "GET", 403],
+    [root + "/vsts/info", "GET", 200],
+    [root + "/git-receive-pack", "POST", 200],
+    [root + "/git-receive-pack?other=1", "POST", 403],
+    [root + "/info/refs?service=git-receive-pack", "GET", 200],
+    [collection + "/" + id + "/_apis/git/repositories/" + id + "/pullrequests?api-version=7.0", "GET", 200],
+    [collection + "/" + id + "/_apis/git/repositories/" + id + "/pullrequests?api-version=7.0", "POST", 200],
+    [collection + "/" + id + "/_apis/git/repositories/" + id + "/pullrequests/17", "PATCH", 403],
+    [collection + "/" + id + "/_apis/git/repositories/" + id + "/refs", "POST", 403],
     [collection + "/_apis/projects", "POST", 403],
     [collection + "Outer/_apis/projects", "GET", 403],
     ["https://elsewhere.example/_apis/projects", "GET", 403],
@@ -34,7 +42,7 @@ test("Azure access stays inside the operator collection and grants only reads an
     const request = new Request(url, {method, headers: {authorization: "Basic fixture", cookie: "secret"}});
     assert.equal((await worker.fetch(request, env)).status, status);
   }
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 11);
   assert.ok(calls.every(request => request.redirect === "manual" && !request.headers.has("cookie")
     && request.headers.get("authorization") === "Basic fixture"));
 });

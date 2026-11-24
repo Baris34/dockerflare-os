@@ -15,7 +15,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
-import { concatBytes, encodeLooseObject, gitObjectOid } from "../src/git-codec";
+import { concatBytes, encodeGitTree, encodeLooseObject, gitObjectOid, type GitTreeEntry } from "../src/git-codec";
 import { decodePack } from "./git-cache-fixtures";
 
 declare module "cloudflare:workers" {
@@ -103,6 +103,81 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
 }
 
 describe("push authorization through the Overseer chokepoints", () => {
+  it("shows the pinned file diff and the commit that will actually be pushed", async () => {
+    await inOverseer("push-reviewed", async impl => {
+      const file = async (name: string, value: string | Uint8Array, mode: GitTreeEntry["mode"] = "100644") => ({
+        name, mode, oid: await storeLocal(impl, "blob", typeof value === "string" ? new TextEncoder().encode(value) : value),
+      });
+      const utf16 = (text: string, littleEndian: boolean) => {
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        const view = new DataView(bytes.buffer);
+        view.setUint16(0, 0xfeff, littleEndian);
+        for (let i = 0; i < text.length; ++i) view.setUint16(2 * (i + 1), text.charCodeAt(i), littleEndian);
+        return bytes;
+      };
+      const before = await storeLocal(impl, "tree", encodeGitTree([
+        await file("gone", "old\n"), await file("edit", "before\n"),
+        await file("script", "/bin/sh\n"), await file("bom", "same\n"),
+        await file("legacy.csproj", utf16("<Project>Önce</Project>\r\n", true)),
+        await file("utf16be", utf16("α\n", false)),
+      ]));
+      const base = await impl.gitCache.putFromGatekeeper(GATEKEEPER, "commit", commitPayload(before, [], "origin"));
+      const after = await storeLocal(impl, "tree", encodeGitTree([
+        await file("edit", "after\n"), await file("new.txt", "hello\n"), await file("binary", "\0\u0001"),
+        await file("script", "/bin/sh\n", "100755"), await file("bom", "\uFEFFsame\n"),
+        await file("legacy.csproj", utf16("<Project>Şimdi</Project>\r\n", true)),
+        await file("utf16be", utf16("β\n", false)), await file("invalid", Uint8Array.of(0xff, 0xfe, 0x61)),
+      ]));
+      const head = await storeLocal(impl, "commit", commitPayload(after, [base], "publish this"));
+      const finalTree = await storeLocal(impl, "tree", encodeGitTree([await file("final.txt", "replacement\n")]));
+      const tip = await storeLocal(impl, "commit", commitPayload(finalTree, [head], "remove earlier files"));
+      await impl.submitAction(GATEKEEPER, 1, {...pushDescription([tip]), reviewPushFrom: base}, {from: "user"});
+      const [record] = Array.from<any>(impl.storage.actions.list());
+      const review = record.description.fields.map((field: {value: string}) => field.value).join("\n");
+      for (const expected of ["new.txt", "+hello", "gone", "-old", "-before", "+after", "100755", "script", "\\ufeffsame",
+                             "-hello", "final.txt", "+replacement", "binary", "2 bytes", "+00 01", "+ff fe 61",
+                             "UTF-16LE with BOM", "-<Project>Önce</Project>", "+<Project>Şimdi</Project>",
+                             "UTF-16BE with BOM", "-α", "+β", "publish this", head, tip, base]) {
+        expect(review).toContain(expected);
+      }
+      expect(record.state).toBe("pending");
+      expect(record.description.descriptionIsComplete).toBeFalsy();
+    });
+  });
+
+  it("requires a linear push from the destination base, with a nonempty reviewable diff", async () => {
+    await inOverseer("push-reviewed-history", async impl => {
+      const {base, head} = await seedPushableHistory(impl);
+      const tree = await storeLocal(impl, "tree", new Uint8Array());
+      const child = await storeLocal(impl, "commit", commitPayload(tree, [head], "another"));
+      const merge = await storeLocal(impl, "commit", commitPayload(tree, [base, head], "merge"));
+      const submit = (baseOid: string, heads: string[]) => impl.submitAction(GATEKEEPER, 1,
+        {...pushDescription(heads), reviewPushFrom: baseOid}, {from: "user"});
+      await expect(submit(base, [head])).rejects.toThrow(/no file changes/i);
+      await expect(submit(base, [child])).rejects.toThrow(/no file changes/i);
+      await expect(submit(base, [merge])).rejects.toThrow(/single parent/i);
+      await expect(submit(head, [child])).rejects.toThrow(/destination/i);
+      await expect(submit(base, [child, merge])).rejects.toThrow(/one.*commit/i);
+      await expect(submit(base, [])).rejects.toThrow(/one.*commit/i);
+      expect(Array.from(impl.storage.actions.list())).toEqual([]);
+    });
+  });
+
+  it("refuses a review too large to show in full without queuing the push", async () => {
+    await inOverseer("push-reviewed-budget", async impl => {
+      const {base} = await seedPushableHistory(impl);
+      for (const bytes of [new TextEncoder().encode("x".repeat(100 * 1024)), new Uint8Array(64 * 1024)]) {
+        const blob = await storeLocal(impl, "blob", bytes);
+        const tree = await storeLocal(impl, "tree", encodeGitTree([{name: "large-file", mode: "100644", oid: blob}]));
+        const head = await storeLocal(impl, "commit", commitPayload(tree, [base], "too large"));
+        await expect(impl.submitAction(GATEKEEPER, 1, {...pushDescription([head]), reviewPushFrom: base}, {from: "user"}))
+          .rejects.toThrow(/review.*limit/i);
+        expect(impl.storage.gitObjectMetadata.get(head)?.pendingPush ?? []).toEqual([]);
+      }
+      expect(Array.from(impl.storage.actions.list())).toEqual([]);
+    });
+  });
+
   it("verifies, marks, applies with an action-scoped cache, and converts marks", async () => {
     await inOverseer("push-apply", async impl => {
       let { base, head } = await seedPushableHistory(impl);
@@ -154,12 +229,11 @@ describe("push authorization through the Overseer chokepoints", () => {
 
   it("refuses a push while the workspace is restricted, queuing nothing", async () => {
     await inOverseer("push-restricted", async impl => {
-      let { head } = await seedPushableHistory(impl);
+      let { base, head } = await seedPushableHistory(impl);
       impl.storage.containsRestrictedData.put(true);
 
-      // Proven ancestry does not help: the commits cannot be reviewed as text by the approver.
-      await expect(impl.submitAction(GATEKEEPER, 1, pushDescription([head]), { from: "user" }))
-          .rejects.toThrow(/git push cannot be reviewed as of yet/);
+      await expect(impl.submitAction(GATEKEEPER, 1, {...pushDescription([head]), reviewPushFrom: base}, { from: "user" }))
+          .rejects.toThrow(/git pushes are disabled/i);
       expect(Array.from(impl.storage.actions.list())).toStrictEqual([]);
       expect(Array.from(impl.storage.gitObjectMetadata.byPendingPushAction.list()))
           .toStrictEqual([]);

@@ -8,9 +8,11 @@ import type {
   GitPullTransfer, ObservationDescription, ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { type AzureVerifier, type Env } from "./azure-repos";
+import { AzureClient } from "./azure-client";
+import { BranchPublications } from "./branch-publications";
 import type { BranchSelection } from "./resource-url";
 import { pullAzureGit } from "./azure-git";
-import type { AzureReposBranch, AzureReposCheckout } from "./types";
+import type { AzurePublication, AzurePullRequestProposal, AzureReposBranch, AzureReposCheckout } from "./types";
 import TYPES_CODE from "./generated/branch-types.txt";
 
 export type PinnedBranch = BranchSelection & {collectionId: string};
@@ -43,28 +45,48 @@ function observe(queue: RpcStub<ApprovalQueue>, observation: ObservationDescript
 class BranchSession extends RpcTarget implements AzureReposBranch {
   #queue: RpcStub<ApprovalQueue>;
   #ctx: DurableObjectState<BranchProps>;
-  constructor(queue: RpcStub<ApprovalQueue>, ctx: DurableObjectState<BranchProps>) {
+  #publications: BranchPublications;
+  constructor(queue: RpcStub<ApprovalQueue>, ctx: DurableObjectState<BranchProps>, publications: BranchPublications) {
     super();
     this.#queue = queue;
     this.#ctx = ctx;
+    this.#publications = publications;
   }
   [Symbol.dispose]() { this.#queue[Symbol.dispose](); }
-  async getCheckout(): Promise<AzureReposCheckout> {
+  async #authorize(title: string, description: string, requireCurrentTip = false) {
     const props = this.#ctx.props;
     const account = this.#ctx.exports.UserAccount;
-    await account.get(account.idFromString(props.userObjectId)).verifyPin(pinOf(props));
+    await account.get(account.idFromString(props.userObjectId)).verifyPin(pinOf(props), requireCurrentTip);
     await observe(this.#queue, {
-      title: "Open Azure Repos revision", description: "Read the attached branch revision.",
+      title, description,
       subresources: [await observationId(props)],
     });
+  }
+  async getCheckout(): Promise<AzureReposCheckout> {
+    await this.#authorize("Open Azure Repos revision", "Read the attached branch revision.");
+    const props = this.#ctx.props;
     using cache = await this.#queue.getGitCache();
     await cache.advertiseCommit(props.commitId);
     return {project: props.project, repository: props.repository, refName: props.refName, commitId: props.commitId};
+  }
+  async proposePullRequest(commitId: string, title: string, description = ""): Promise<AzurePullRequestProposal> {
+    await this.#authorize("Prepare Azure pull request", "Use the attached repository and target branch.", true);
+    return this.#publications.propose(this.#queue, commitId, title, description);
+  }
+  async getPublication(sourceRefName: string): Promise<AzurePublication> {
+    await this.#authorize("Read Azure publication status", "Read the outcome of a proposal made through this connection.");
+    return this.#publications.status(sourceRefName);
   }
 }
 
 @validateRpc()
 export class AzureBranchGatekeeper extends DurableObject<Env, BranchProps> implements Gatekeeper<AzureReposBranch> {
+  #publications = new BranchPublications(this.ctx.storage, this.ctx.props, async () => {
+    const props = this.ctx.props;
+    const accounts = this.ctx.exports.UserAccount;
+    const pat = await accounts.get(accounts.idFromString(props.userObjectId)).tokenForPin(pinOf(props));
+    return new AzureClient(this.env, pat);
+  });
   async describe(): Promise<ResourceDescription> {
     // Workshop uses this description to ask a prospective observer to choose an account, before
     // verifying their access. Its stored resource type identifies the binding during that step.
@@ -76,7 +98,7 @@ export class AzureBranchGatekeeper extends DurableObject<Env, BranchProps> imple
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
   async startSession(queue: RpcStub<ApprovalQueue>): Promise<AzureReposBranch> {
-    return new BranchSession(queue.dup(), this.ctx);
+    return new BranchSession(queue.dup(), this.ctx, this.#publications);
   }
   async gitPull(oids: GitOid[], hints: GitPullHints): Promise<GitPullTransfer> {
     const pin = pinOf(this.ctx.props);
@@ -101,7 +123,7 @@ export class AzureBranchGatekeeper extends DurableObject<Env, BranchProps> imple
   async getHistoricalSubresources(): Promise<string[]> { return []; }
   async addObserver(_id: string, _verifier: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
   async removeObserver(_id: string): Promise<void> {}
-  async applyAction(_id: number, _cache: RpcStub<GitCache>): Promise<void> { throw new Error("Read-only resource."); }
-  async rejectAction(_id: number): Promise<void> { throw new Error("Read-only resource."); }
-  async revertAction(_id: number): Promise<void> { throw new Error("Read-only resource."); }
+  async applyAction(id: number, cache: RpcStub<GitCache>): Promise<void> { await this.#publications.apply(id, cache); }
+  async rejectAction(id: number): Promise<void> { await this.#publications.reject(id); }
+  async revertAction(_id: number): Promise<void> { throw new Error("Manage a published pull request in Azure Repos."); }
 }

@@ -1,7 +1,9 @@
 const guid = "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}";
 const collectionRead = new RegExp(`^/_apis/(?:connectionData|projects(?:/${guid})?|permissions/${guid}/2)/?$`, "i");
 const repositoryRead = new RegExp(`^/${guid}/_apis/git/repositories(?:/${guid}(?:/(?:refs|items|commits(?:/[0-9a-f]{40})?|diffs/commits|trees/[0-9a-f]{40}))?)?/?$`, "i");
+const pullRequests = new RegExp(`^/${guid}/_apis/git/repositories/${guid}/pullrequests$`, "i");
 const gitPath = /^\/([^/]+)\/_git\/([^/]+)\/(info\/refs|git-upload-pack)$/;
+const writePath = new RegExp(`^/${guid}/_git/${guid}/(vsts/info|info/refs|git-receive-pack)$`, "i");
 
 function validGitSegment(segment) {
   try {
@@ -23,18 +25,22 @@ export default {
     }
     const match = gitPath.exec(path);
     const git = match && validGitSegment(match[1]) && validGitSegment(match[2]) && match[3];
+    const writeGit = writePath.exec(path)?.[1];
     const read = request.method === "GET" &&
-      (collectionRead.test(path) || repositoryRead.test(path) ||
-        (git === "info/refs" && target.search === "?service=git-upload-pack"));
-    const uploadPack = request.method === "POST" && git === "git-upload-pack" && !target.search;
-    if (!read && !uploadPack) return new Response("Unsupported Azure operation", {status: 403});
+      (collectionRead.test(path) || repositoryRead.test(path) || pullRequests.test(path) ||
+        (git === "info/refs" && target.search === "?service=git-upload-pack") ||
+        (writeGit === "vsts/info" && !target.search) ||
+        (writeGit === "info/refs" && target.search === "?service=git-receive-pack"));
+    const post = request.method === "POST" && (pullRequests.test(path) ||
+      ((git === "git-upload-pack" || writeGit === "git-receive-pack") && !target.search));
+    if (!read && !post) return new Response("Unsupported Azure operation", {status: 403});
     const headers = new Headers();
     for (const name of ["Authorization", "Content-Type", "Accept", "X-TFS-FedAuthRedirect"]) {
       if (request.headers.has(name)) headers.set(name, request.headers.get(name));
     }
     const outgoing = new Request(target, {
       method: request.method, headers, redirect: "manual", signal: request.signal,
-      ...(uploadPack && {body: request.body, duplex: "half"}),
+      ...(post && {body: request.body, duplex: "half"}),
     });
     // Local Wrangler uses its own outbound network. In Docker the network is a private binding.
     const response = await (env.AZURE_UPSTREAM ?? globalThis).fetch(outgoing);

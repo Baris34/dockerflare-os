@@ -1,7 +1,7 @@
 import { SELF, runInDurableObject } from "cloudflare:test";
 import { env, exports, RpcStub, RpcTarget } from "cloudflare:workers";
 import { expect, it } from "vitest";
-import type { ApprovalQueue, GatekeeperConnectCallback, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { ActionDescription, ApprovalQueue, GatekeeperConnectCallback, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { AzureBranchGatekeeper, BranchProps } from "../../src/branch";
 import { collectionId, commitId, projectId, refName, repositoryId } from "./fake-azure";
 
@@ -79,7 +79,11 @@ it("stages only a matching identity and commits only the ticket's own unexpired 
 class RecordingQueue extends RpcTarget {
   observations: ObservationDescription[] = [];
   commits: string[] = [];
+  actions: {id: number; description: ActionDescription}[] = [];
   refuse = false;
+  async submitAction(id: number, description: ActionDescription) {
+    this.actions.push({id, description});
+  }
   async authorizeObservation(observation: ObservationDescription) {
     this.observations.push(observation);
     if (this.refuse) throw new Error("Observation refused");
@@ -89,6 +93,34 @@ class RecordingQueue extends RpcTarget {
     return new class extends RpcTarget {async advertiseCommit(oid: string) {commits.push(oid);}}();
   }
 }
+
+it("binds a proposal to the selected base, deduplicates submissions and records a rejection", async () => {
+  const owner = await connect("test-owner-pat");
+  const head = "d".repeat(40);
+  const result = await runInDurableObject(owner.account, async (_, state) => {
+    const props: BranchProps = {...pin, userObjectId: owner.userObjectId, project: "Finance", repository: "Pilot"};
+    const facet = state.facets.get<AzureBranchGatekeeper>("publish", () => ({class: exports.AzureBranchGatekeeper({props})}));
+    const recorder = new RecordingQueue();
+    using queue = new RpcStub(recorder);
+    using session = await facet.startSession(queue as unknown as ApprovalQueue);
+    const propose = () => session.proposePullRequest(head, "Add note", "Review the text file.");
+    await expect(Promise.resolve(session.proposePullRequest(commitId, "No change"))).rejects.toThrow();
+    const [first, duplicate] = await Promise.all([propose(), propose()]);
+    expect(duplicate).toEqual(first);
+    expect(await session.getPublication(first.sourceRefName)).toMatchObject({status: "pending"});
+    await expect(Promise.resolve(session.getPublication(refName))).rejects.toThrow();
+    await facet.rejectAction(recorder.actions[0].id);
+    expect(await session.getPublication(first.sourceRefName)).toMatchObject({status: "rejected"});
+    return {first, actions: recorder.actions, kinds: await facet.getAutoApprovableActions()};
+  });
+  expect(result.kinds).toEqual([]);
+  expect(result.first).toEqual({sourceRefName: expect.stringMatching(/^refs\/heads\/agents\/[a-f0-9-]{36}$/), targetRefName: refName});
+  expect(result.actions).toHaveLength(1);
+  expect(result.actions[0].description).toMatchObject({
+    reviewPushFrom: commitId, pushedCommits: [head], autoApprovable: false, awaitDecision: true,
+    fields: expect.arrayContaining([expect.objectContaining({value: "Review the text file."})]),
+  });
+});
 
 it("keeps the observer setup description independent of the private Azure selection", async () => {
   const id = env.USER_ACCOUNT.newUniqueId();

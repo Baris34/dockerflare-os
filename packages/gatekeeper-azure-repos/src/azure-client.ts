@@ -13,6 +13,9 @@ export class AzureAccessDenied extends Error {
   }
 }
 
+/** Sanitized failure of an HTTP request to the configured collection. */
+export class AzureRequestError extends Error {}
+
 type NamedResource = { id: string; name: string };
 type Branch = { refName: string; commitId: string };
 type Page<T> = { items: T[]; nextCursor?: string };
@@ -41,6 +44,11 @@ function oid(value: unknown): string {
     throw new Error("Invalid Azure Repos Git object ID.");
   }
   return value.toLowerCase();
+}
+
+/** Writing requires a fresh review if the target has moved since the user selected it. */
+export function requirePublicationBase(selected: string, current: string) {
+  if (selected !== current) throw new Error("The target branch moved. Select its current revision, reapply the changes, and review a new proposal.");
 }
 
 function branchName(value: unknown): string {
@@ -102,7 +110,7 @@ export function collectionUrl(env: AzureEnv): string {
   return url.href.replace(/\/+$/, "");
 }
 
-/** Internal, PAT-scoped client. Only fixed REST routes and read-only Git services can carry credentials. */
+/** Internal, PAT-scoped client. Only fixed REST and Git routes can carry credentials. */
 export class AzureClient {
   readonly #collection: string;
   readonly #version: string;
@@ -119,38 +127,45 @@ export class AzureClient {
     this.#network = env.AZURE_NETWORK;
   }
 
-  async #send(path: string, query: Record<string, string>, accept: string, body?: Uint8Array): Promise<Response> {
+  async #send(path: string, query: Record<string, string>, accept: string, body?: BodyInit, contentType?: string): Promise<Response> {
     const url = new URL(this.#collection + "/" + path);
     url.search = new URLSearchParams(query).toString();
     const headers = new Headers({ Authorization: this.#authorization, Accept: accept, "X-TFS-FedAuthRedirect": "Suppress" });
-    if (body !== undefined) headers.set("Content-Type", "application/x-git-upload-pack-request");
+    if (contentType) headers.set("Content-Type", contentType);
     const request = new Request(url, {
       method: body === undefined ? "GET" : "POST",
       headers, body, redirect: "manual", signal: AbortSignal.timeout(60_000),
+      ...(body instanceof ReadableStream && {duplex: "half"}),
     });
     let response: Response;
     try {
       response = this.#network ? await this.#network.fetch(request) : await fetch(request);
     } catch {
       // Private connectors and reverse proxies may include request details in their errors.
-      throw new Error("Could not contact the configured Azure DevOps Server.");
+      throw new AzureRequestError("Could not contact the configured Azure DevOps Server.");
     }
-    if (response.status === 200 && !response.redirected) return response;
+    if (!response.redirected && (response.status === 200 || (response.status === 201 && contentType === "application/json"))) return response;
     if (response.status === 400) {
       const route = path.includes("/_git/")
-        ? "{project}/_git/{repository}/" + (body === undefined ? "info/refs" : "git-upload-pack")
+        ? "{project}/_git/{repository}/" + (path.endsWith("/vsts/info") ? "vsts/info" :
+          body === undefined ? "info/refs" : path.split("/").at(-1))
         : path.replace(/\b(?:[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}|[\da-f]{40})\b/gi, "{id}");
       const version = query["api-version"] ? " (API " + query["api-version"] + ")" : "";
-      throw new Error(`Azure DevOps ${request.method} /${route}${version} failed (HTTP 400).${await badRequestDetails(response)}`);
+      throw new AzureRequestError(`Azure DevOps ${request.method} /${route}${version} failed (HTTP 400).${await badRequestDetails(response)}`);
     }
     await response.body?.cancel().catch(() => undefined);
+    if ((response.status === 403 || response.status === 404) && path.endsWith("/vsts/info")) {
+      throw new AzureAccessDenied(`Could not verify the GUID-based Git URL via vsts/info (HTTP ${response.status}). ` +
+        "Check repository access and whether this Azure DevOps Server supports this Git URL.");
+    }
     if (response.status === 403 || response.status === 404) throw new AzureAccessDenied();
     if (response.status === 401) throw new CredentialsExpiredError("Azure DevOps rejected the personal access token.");
-    throw new Error(`Azure DevOps request failed (HTTP ${response.status}).`);
+    throw new AzureRequestError(`Azure DevOps request failed (HTTP ${response.status}).`);
   }
 
-  async #json(path: string, query: Record<string, string> = {}, version = this.#version, limit = maxJsonBytes) {
-    const response = await this.#send(path, { ...query, "api-version": version }, "application/json");
+  async #json(path: string, query: Record<string, string> = {}, version: string | null = this.#version, limit = maxJsonBytes, body?: string) {
+    const response = await this.#send(path, version ? { ...query, "api-version": version } : query, "application/json", body,
+      body === undefined ? undefined : "application/json");
     try {
       const data: unknown = JSON.parse(await readTextCapped(response, limit));
       return { data: record(data), nextCursor: response.headers.get("x-ms-continuationtoken") || undefined };
@@ -276,7 +291,7 @@ export class AzureClient {
   }
 
   /** Check the calling PAT's live branch permission, pinned revision ancestry, and ability to read the root tree. */
-  async verifyPinned(projectId: string, repoId: string, refName: string, commitId: string): Promise<void> {
+  async verifyPinned(projectId: string, repoId: string, refName: string, commitId: string, requireCurrentTip = false): Promise<void> {
     const pin = oid(commitId);
     const repo = repoPath(projectId, repoId);
     await this.getRepository(projectId, repoId);
@@ -286,6 +301,7 @@ export class AzureClient {
     if (!Array.isArray(acl.value) || acl.value.length !== 1 || typeof acl.value[0] !== "boolean") throw invalidResponse();
     if (!acl.value[0]) throw new AzureAccessDenied();
     const branch = await this.getBranch(projectId, repoId, refName);
+    if (requireCurrentTip) requirePublicationBase(pin, branch.commitId);
     if (branch.commitId !== pin) {
       const { data } = await this.#json(repo + "/diffs/commits", {
         baseVersion: pin, baseVersionType: "commit", targetVersion: branch.commitId, targetVersionType: "commit", $top: "1",
@@ -318,8 +334,7 @@ export class AzureClient {
     return wanted.size === 0;
   }
 
-  /** Git v0 discovery and upload-pack RPC for one repository. No protocol-v2 negotiation or write service. */
-  async gitUploadPack(projectId: string, repoId: string, body?: Uint8Array): Promise<Response> {
+  async #gitBase(projectId: string, repoId: string): Promise<string> {
     const restPath = repoPath(projectId, repoId);
     if (this.#gitRoute?.restPath !== restPath) {
       // Azure's clone route uses names. Resolve them from the pinned GUIDs once per negotiation;
@@ -327,15 +342,67 @@ export class AzureClient {
       const {repo, project} = await this.#repository(projectId, repoId);
       this.#gitRoute = {restPath, base: `${gitNameSegment(project.name)}/_git/${gitNameSegment(repo.name)}/`};
     }
-    const {base} = this.#gitRoute;
-    const contentType = "application/x-git-upload-pack-" + (body === undefined ? "advertisement" : "result");
+    return this.#gitRoute.base;
+  }
+
+  async #gitService(base: string, service: "git-upload-pack" | "git-receive-pack", body?: BodyInit) {
+    const contentType = `application/x-${service}-` + (body === undefined ? "advertisement" : "result");
     const response = body === undefined
-      ? await this.#send(base + "info/refs", { service: "git-upload-pack" }, contentType)
-      : await this.#send(base + "git-upload-pack", {}, contentType, body);
+      ? await this.#send(base + "info/refs", {service}, contentType)
+      : await this.#send(base + service, {}, contentType, body, `application/x-${service}-request`);
     if (response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== contentType) {
       await response.body?.cancel().catch(() => undefined);
       throw invalidResponse();
     }
     return response;
+  }
+
+  async gitUploadPack(projectId: string, repoId: string, body?: Uint8Array): Promise<Response> {
+    return this.#gitService(await this.#gitBase(projectId, repoId), "git-upload-pack", body);
+  }
+
+  async gitReceivePack(projectId: string, repoId: string, body?: ReadableStream<Uint8Array>): Promise<Response> {
+    const project = guid(projectId), repo = guid(repoId);
+    const base = `${project}/_git/${repo}/`;
+    // A name-based clone URL can be reassigned after approval. Verify the clone route's
+    // identity on discovery and again before sending workspace objects to its immutable path.
+    try {
+      const {data} = await this.#json(base + "vsts/info", {}, null, 64 * 1024);
+      const identity = record(data.repository);
+      if (guid(identity.id) !== repo || guid(record(identity.project).id) !== project) {
+        throw new AzureAccessDenied("Azure did not confirm the selected repository's Git write URL.");
+      }
+      return await this.#gitService(base, "git-receive-pack", body);
+    } catch (error) {
+      await body?.cancel().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async #pullRequest(value: unknown, projectId: string, repoId: string, source: string, target: string) {
+    const pr = record(value);
+    const id = pr.pullRequestId;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 ||
+        guid(record(pr.repository).id) !== guid(repoId) || pr.forkSource ||
+        pr.sourceRefName !== source || pr.targetRefName !== target ||
+        (pr.status !== "active" && pr.status !== "abandoned" && pr.status !== "completed")) throw invalidResponse();
+    const base = await this.#gitBase(projectId, repoId);
+    return {pullRequestId: id, url: this.#collection + "/" + base + "pullrequest/" + id, status: pr.status,
+      head: pr.lastMergeSourceCommit ? oid(record(pr.lastMergeSourceCommit).commitId) : undefined};
+  }
+
+  async findPullRequest(projectId: string, repoId: string, source: string, target: string) {
+    const {data} = await this.#json(repoPath(projectId, repoId) + "/pullrequests", {
+      "searchCriteria.status": "all", "searchCriteria.sourceRepositoryId": repoId,
+      "searchCriteria.sourceRefName": source, "searchCriteria.targetRefName": target, $top: "2",
+    });
+    if (!Array.isArray(data.value) || data.value.length > 1) throw invalidResponse();
+    return data.value.length ? this.#pullRequest(data.value[0], projectId, repoId, source, target) : undefined;
+  }
+
+  async createPullRequest(projectId: string, repoId: string, source: string, target: string, title: string, description: string) {
+    const {data} = await this.#json(repoPath(projectId, repoId) + "/pullrequests", {}, this.#version, maxJsonBytes,
+      JSON.stringify({sourceRefName: source, targetRefName: target, title, description}));
+    return this.#pullRequest(data, projectId, repoId, source, target);
   }
 }

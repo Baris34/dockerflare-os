@@ -1874,6 +1874,14 @@ export type ActionDescription = {
   pushedCommits?: GitOid[];
 
   /**
+   * Ask the Workshop to include the immutable file diffs and commit metadata in this push's
+   * approval. The one declared head must descend by a linear history from this destination
+   * commit. The Workshop refuses a review it cannot render within its bounds. The gatekeeper
+   * receives no additional read access to workspace objects before submission.
+   */
+  reviewPushFrom?: GitOid;
+
+  /**
    * Does the Gatekeeper implement `revertAction()` for this action?
    *
    * It is recommended that all actions implement automatic revert. But, if an action is not able

@@ -23,6 +23,18 @@ Workshop’a giriş yaptıktan sonra kişisel Azure PAT’ini bağlayıp erişeb
 
 Yanıttaki SHA’yı Azure’da seçilen commit’le, proje yolunu da o sürümdeki dosyayla karşılaştır. Bu aşamada .NET Framework’ü derlemek için araç kurman gerekmez. Nexus restore, MSBuild ve test sonuçları Windows runner aşamasında eklenecek.
 
+## Değişikliği PR olarak yayımlama
+
+Okumaya ek olarak yayımlama için PAT’in **Code (Read & write)** kapsamına ve Azure hesabının ilgili repoda dal oluşturma, değişiklik gönderme ve pull request açma izinlerine ihtiyacı vardır. Mevcut bağlantındaki PAT bu izinlere sahipse aynı sohbetten devam edebilirsin. [Azure Repos izinleri](https://learn.microsoft.com/en-us/azure/devops/repos/git/set-git-repository-permissions?view=azure-devops-server)
+
+> Worktree’ye eklediğimiz metin dosyasını commit et ve bağlı dala bir PR öner. Onaydan sonra Azure PR bağlantısını göster.
+
+Workshop onay kartında proje, repo, kaynak ve hedef dallar, commit, dosya değişiklikleri ve PR metni görünür. Onay verdiğinde Workshop incelenen commit’i yeni bir `agents/<uuid>` dalına gönderip seçtiğin dala PR açar. PR’ı Azure’da inceleyip birleştirebilirsin. İlk onay isteğini reddettiğinde Azure’da dal veya PR oluşmaz. Aktarım dalı oluşturduktan sonra kesilirse aynı onayı tekrar denemek o daldan devam eder.
+
+Hedef dal ilk gönderimden önce ilerlerse güncel sürümü bağlantı seçicisinde seçip değişikliği yeniden öner. Onay kartı seçilen sürümden başlayan doğrusal geçmişte en fazla 32 commit’i gösterir. UTF-8 ve BOM’lu UTF-16 dosyaları satır farklarıyla, diğer ikili değişiklikler hex olarak incelenebilir. Tam inceleme 96 KiB’ı aşarsa değişikliği daha küçük PR’lara bölmek gerekir.
+
+Yayımlama için sunucunun proje ve repo GUID’leriyle açılan Git yolunu ve bu yoldaki `vsts/info` isteğini desteklemesi gerekir. Workshop, paket gönderilmeden önce bu yanıtı seçtiğin repo kimliğiyle karşılaştırır. Böylece sonradan adı değişmiş bir reponun yerine aynı adı alan başka bir repoya kod gönderilmesi önlenir. [Azure Git repo kimliği](https://learn.microsoft.com/en-us/previous-versions/azure/devops/integrate/previous-apis/git/repositories#by-remote-url)
+
 ## RHEL üzerinde Docker
 
 İki servis imajını build ettikten sonra Workshop servisinin env dosyasında Azure’u etkinleştir. [Docker kurulumu](../../docker/README.md)
@@ -39,5 +51,5 @@ AZURE_DEVOPS_API_VERSION=7.0
 
 - Varsayılan REST sürümü `7.0`. Farklı bir Azure DevOps Server sürümünde `AZURE_DEVOPS_API_VERSION` değerini o kurulumun desteklediği sürüme ayarla. Gerçek kurum sunucusundaki kabul, seçilen bir repo ve o kullanıcının PAT’iyle yapılır. [Microsoft’un sürüm eşlemesi](https://learn.microsoft.com/en-us/azure/devops/integrate/concepts/rest-api-versioning?view=azure-devops)
 - Git aktarımı tek commit derinliğindedir ve sıkıştırılmış aktarım başına sınır 64 MiB’dir. Dal ileri giderse mevcut bağlantı seçilen SHA’da kalır. Yeniden yazılan veya silinen dal için yeni bir sürüm seçmek gerekir. Alt modül içeriği ve Git LFS sunucusundaki büyük dosyalar ayrıca alınmaz.
-- Azure izinleri yeni okumalarda ve paylaşımda kontrol edilir. Önceden Workspace’e aktarılmış veya sohbette gösterilmiş içerik Workspace’in saklama kurallarına tabidir. Azure’a push ve PR açma ilerideki insan onayı aşamasındadır.
+- Azure izinleri yeni okumalarda, paylaşımda ve yayımlama sırasında kontrol edilir. Önceden Workspace’e aktarılmış veya sohbette gösterilmiş içerik Workspace’in saklama kurallarına tabidir. Hassas veri gözlemlemiş bir Workspace’te Workshop’un Git gönderim kısıtlaması geçerlidir.
 - Windows’taki `run-local` tek geliştiricilik pilot içindir. Wrangler ana makinenin ağ erişimini kullanır. Docker dağıtımında Azure’a özel ağ çıkışı yalnız bağlayıcıya açılır.

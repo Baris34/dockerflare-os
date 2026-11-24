@@ -39,14 +39,14 @@ function resource(): SupportedResource {
   return {
     id: "branch", title: "Azure Repos branch",
     urlPattern: BRANCH_URL_PATTERN,
-    description: "Read the selected revision of a Git branch.",
+    description: "Open the selected revision and propose changes to its branch in a pull request.",
   };
 }
 
 function form(env: Env, id: string, nonce: string, error?: string) {
   return formPageResponse(connectFormHtml({
     title: "Connect Azure Repos",
-    intro: `Enter a personal access token with Code (Read) and Project and Team (Read) for ${collectionUrl(env)}.`,
+    intro: `Enter a personal access token for ${collectionUrl(env)} with Project and Team (Read). Use Code (Read) to browse, or Code (Read & write) to publish pull requests.`,
     action: `${baseUrl(env)}/${id}/connect`, nonce, error,
     fields: [{ name: "pat", label: "Personal access token", secret: true }],
   }), error ? 400 : 200);
@@ -201,14 +201,14 @@ export class UserAccount extends DurableObject<Env> {
     return {...await openSelection(key, creds, url), collectionId: creds.collectionId};
   }
   /** Verify the account and ref together. A subsequent Git read must use the same PAT we checked. */
-  async tokenForPin(pin: PinnedBranch): Promise<string> {
+  async tokenForPin(pin: PinnedBranch, requireCurrentTip = false): Promise<string> {
     const creds = this.credentials();
     if (creds.collectionId !== pin.collectionId) throw new AzureAccessDenied();
     const api = new AzureClient(this.env, creds.pat);
     try {
       const identity = await api.identity();
       if (identity.id !== creds.id || identity.collectionId !== pin.collectionId) throw new AzureAccessDenied();
-      await api.verifyPinned(pin.projectId, pin.repositoryId, pin.refName, pin.commitId);
+      await api.verifyPinned(pin.projectId, pin.repositoryId, pin.refName, pin.commitId, requireCurrentTip);
     } catch (error) {
       const kv = this.ctx.storage.kv;
       if (isCredentialsExpired(error) && kv.get<Credentials>("credentials")?.generation === creds.generation) {
@@ -219,8 +219,8 @@ export class UserAccount extends DurableObject<Env> {
     if (this.credentials().generation !== creds.generation) throw new Error("Azure connection changed. Try again.");
     return creds.pat;
   }
-  async verifyPin(pin: PinnedBranch): Promise<void> {
-    await this.tokenForPin(pin);
+  async verifyPin(pin: PinnedBranch, requireCurrentTip = false): Promise<void> {
+    await this.tokenForPin(pin, requireCurrentTip);
   }
   async hasPin(pin: PinnedBranch): Promise<boolean> {
     try {

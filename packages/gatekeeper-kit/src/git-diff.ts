@@ -208,21 +208,20 @@ type ChangedEntry = {
   newEntry?: GitTreeEntry;
 };
 
-async function loadTree(source: TreeDiffSource, oid: GitOid | null): Promise<GitTreeEntry[]> {
+async function loadTree(source: Pick<TreeDiffSource, "getTree">, oid: GitOid | null): Promise<GitTreeEntry[]> {
   if (oid === null) return [];
   const entries = await source.getTree(oid);
   if (entries === null) throw new TreeUnavailableError(oid);
   return entries;
 }
 
-// Recursive pruning walk: subtrees with equal oids are skipped without loading, so the work is
-// bounded by the changed portion of the tree rather than the repository size.
-async function walkTreeDiff(
-  source: TreeDiffSource,
+/** Visit changed leaves, with modes and object IDs, skipping identical subtrees without loading them. */
+export async function visitTreeDiff(
+  source: Pick<TreeDiffSource, "getTree">,
   oldOid: GitOid | null,
   newOid: GitOid | null,
-  prefix: string,
-  out: ChangedEntry[],
+  visit: (entry: ChangedEntry) => void,
+  prefix = "",
 ): Promise<void> {
   if (oldOid === newOid) return;
   const oldEntries = new Map((await loadTree(source, oldOid)).map(entry => [entry.name, entry]));
@@ -241,24 +240,24 @@ async function walkTreeDiff(
 
     // A directory on either side recurses; a dir-vs-file conflict is a remove plus an add.
     if (oldKind === "dir" || newKind === "dir") {
-      await walkTreeDiff(
+      await visitTreeDiff(
         source,
         oldKind === "dir" ? oldEntry!.oid : null,
         newKind === "dir" ? newEntry!.oid : null,
+        visit,
         `${path}/`,
-        out,
       );
-      if (oldEntry && oldKind !== "dir") out.push({ path, status: "removed", oldEntry });
-      if (newEntry && newKind !== "dir") out.push({ path, status: "added", newEntry });
+      if (oldEntry && oldKind !== "dir") visit({ path, status: "removed", oldEntry });
+      if (newEntry && newKind !== "dir") visit({ path, status: "added", newEntry });
       continue;
     }
 
     if (oldEntry && newEntry) {
-      out.push({ path, status: "modified", oldEntry, newEntry });
+      visit({ path, status: "modified", oldEntry, newEntry });
     } else if (newEntry) {
-      out.push({ path, status: "added", newEntry });
+      visit({ path, status: "added", newEntry });
     } else if (oldEntry) {
-      out.push({ path, status: "removed", oldEntry });
+      visit({ path, status: "removed", oldEntry });
     }
   }
 }
@@ -272,9 +271,9 @@ export async function changedPathsBetweenTrees(
   oldTree: GitOid | null,
   newTree: GitOid | null,
 ): Promise<string[]> {
-  const entries: ChangedEntry[] = [];
-  await walkTreeDiff(source, oldTree, newTree, "", entries);
-  return [...new Set(entries.map(entry => entry.path))];
+  const paths = new Set<string>();
+  await visitTreeDiff(source, oldTree, newTree, entry => paths.add(entry.path));
+  return [...paths];
 }
 
 function isBinary(bytes: Uint8Array): boolean {
@@ -295,7 +294,7 @@ export async function diffGitTrees(
   newTree: GitOid | null,
 ): Promise<TreeDiffFile[]> {
   const entries: ChangedEntry[] = [];
-  await walkTreeDiff(source, oldTree, newTree, "", entries);
+  await visitTreeDiff(source, oldTree, newTree, entry => entries.push(entry));
 
   const files: TreeDiffFile[] = [];
   let budget = MAX_DIFF_TOTAL_BYTES;

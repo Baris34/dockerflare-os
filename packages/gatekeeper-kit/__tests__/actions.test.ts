@@ -798,7 +798,7 @@ describe("defineActions", () => {
 
   it("forwards the commits a description declares, which scope the action's git cache", async () => {
     const { actions } = bind({
-      describe: () => ({ ...presentation, pushedCommits: ["abc"] }),
+      describe: () => ({ ...presentation, pushedCommits: ["abc"], reviewPushFrom: "base" }),
     });
     const submitAction = submitSpy();
 
@@ -807,6 +807,7 @@ describe("defineActions", () => {
     expect(submitAction).toHaveBeenCalledWith(id, {
       ...presentation,
       pushedCommits: ["abc"],
+      reviewPushFrom: "base",
       actionKind: { tag: "sql", label: "Run SQL" },
       autoApprovable: true,
     });

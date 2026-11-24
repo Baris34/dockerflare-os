@@ -451,6 +451,8 @@ export const MAX_RECEIVE_PACK_RESPONSE_BYTES = 64 * 1024;
 /** One ref update for `pushGitRefUpdate`. `branch` is a branch name, not a full refname. */
 export type GitRefUpdate = {
   branch: string;
+  /** Omit the optional agent capability when the remote advertisement did not include it. */
+  sendAgent?: boolean;
   /** The expected current value of the ref (`ZERO_OID` to require that it not exist). */
   oldSha: GitOid;
   /** The value to set (`ZERO_OID` to delete the ref). */
@@ -501,8 +503,8 @@ export function buildRefUpdateRequest(update: GitRefUpdate): Uint8Array {
   if (update.oldSha === update.newSha) {
     throw new Error("ref update is a no-op");
   }
-  let command = `${update.oldSha} ${update.newSha} refs/heads/${update.branch}` +
-      `\0report-status agent=${GIT_AGENT}`;
+  let command = `${update.oldSha} ${update.newSha} refs/heads/${update.branch}\0report-status` +
+      (update.sendAgent === false ? "" : ` agent=${GIT_AGENT}`);
   let pieces = [encodePktLine(command), FLUSH_PKT];
   let out = new Uint8Array(pieces.reduce((total, piece) => total + piece.byteLength, 0));
   let offset = 0;

@@ -79,12 +79,11 @@ describe("submitAction refusals", () => {
       seedGatekeeper(impl, 1);
       seedRestrictedObservation(impl, 1, 100);
 
-      // Commits cannot be reviewed as text, so the claim does not count. Refused before push
-      // ancestry is even checked, which is why an unproven head is fine here.
+      // Restricted mode refuses a push before checking ancestry, including an unproven head.
       await expect(impl.submitAction(1, 0, {
         ...POKE,
         pushedCommits: ["0123456789abcdef0123456789abcdef01234567"],
-      }, CALLER)).rejects.toThrow(/git push cannot be reviewed as of yet/i);
+      }, CALLER)).rejects.toThrow(/git pushes are disabled/i);
       expect(actionStates(impl)).toEqual([]);
     });
   });

@@ -155,6 +155,12 @@ describe("Azure DevOps Server", () => {
     }
   });
 
+  it("requires the selected target revision to be current when preparing a publication", async () => {
+    const {client} = fixture(repository(), page([true]), page([{name: branch, objectId: tip}]),
+      Response.json({commonCommit: pin}), Response.json(rootTree));
+    await expect(client.verifyPinned(project, repo, branch, pin, true)).rejects.toThrow(/target branch moved/i);
+  });
+
   it("separates invalid auth and provider failure from denial without returning upstream content", async () => {
     for (const status of [401, 503, 302]) {
       const { client, requests } = fixture(new Response(pat, { status, headers: { location: "https://elsewhere.test/" + pat } }));

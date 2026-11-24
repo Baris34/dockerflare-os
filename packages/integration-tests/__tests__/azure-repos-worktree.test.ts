@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi } from "@gadgets/workshop-shared/api";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 import type { BranchConfiguratorRpc } from "../../gatekeeper-azure-repos/src/configurator/branch-configurator-types";
 import { loadAllChatHistory } from "../src/agent-session.js";
 import { startHarness, type Harness } from "../src/harness.js";
-import { SCRIPTED_MODEL_ID, scriptedModelRouter } from "../src/mock-model.js";
+import { SCRIPTED_MODEL_ID, scriptedModelRouter, type ChatCompletionStep } from "../src/mock-model.js";
 import { NetworkInterceptor, type Handler } from "../src/network-interceptor.js";
 import {
   connect, listConnectedAccounts, MAX_OBSERVER_PROMPTS, nextUsernames, ObserverConfigRecorder,
@@ -23,6 +23,7 @@ const collection = "https://azure.example.test/tfs/Engineering";
 const gitPath = "/Engineering/_git/Pilot";
 const project = "172cf866-bbf3-4063-a89a-55e18d0a55f1";
 const repo = "d996ae88-74d5-4426-99d9-048ceecaf6b5";
+const gitWritePath = `/${project}/_git/${repo}`;
 const refName = "refs/heads/release/legacy";
 const pat = "workshop-test-fixture-pat";
 const observerPat = "workshop-observer-fixture-pat";
@@ -45,7 +46,7 @@ function createFixture() {
   git("config", "core.autocrlf", "false");
   git("config", "core.hooksPath", join(directory.path, "no-hooks"));
   write("Legacy.csproj", projectXml("v4.7.2"));
-  const main = commit();
+  commit();
   git("switch", "--quiet", "-c", refName.slice("refs/heads/".length));
   const names = ["Legacy", "Sdk", "Imported", "Conditional"];
   const sln = ["Microsoft Visual Studio Solution File, Format Version 12.00",
@@ -63,6 +64,10 @@ function createFixture() {
   let tip = pin;
   const root = { path: "/", gitObjectType: "tree", commitId: pin, objectId: git("rev-parse", pin + "^{tree}") };
   const requests: string[] = [];
+  const pullRequests: {
+    pullRequestId: number; repository: {id: string}; status: string;
+    sourceRefName: string; targetRefName: string; title: string; description: string;
+  }[] = [];
   const uploadPack = (...args: string[]) => ["-c", "uploadpack.allowReachableSHA1InWant=true",
     "upload-pack", "--stateless-rpc", ...args, directory.path];
   const gitEnv = { ...process.env, GIT_PROTOCOL: "version=0" };
@@ -88,12 +93,21 @@ function createFixture() {
         { id: "e87ba9b0-f39f-44b4-ba93-2dfb93be57b7", name: "Other", project: team }, pilot,
       ] });
       if (path === api) return Response.json(pilot);
+      if (path === gitWritePath + "/vsts/info") return Response.json({repository: pilot});
       if (path === "/_apis/permissions/2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87/2") {
         return Response.json({ value: [!otherUser || observerAllowed] });
       }
       if (path === api + "/refs") {
-        const refs = [{ name: "refs/heads/main", objectId: main }, { name: refName, objectId: tip }];
+        const refs = git("for-each-ref", "--format=%(objectname) %(refname)", "refs/heads").split("\n").map(line => {
+          const [objectId, name] = line.trim().split(" ");
+          return { objectId, name };
+        });
         return Response.json({ value: refs.filter(ref => ref.name.slice(5).startsWith(url.searchParams.get("filter") ?? "")) });
+      }
+      if (path === api + "/pullrequests") {
+        const value = pullRequests.filter(pr => pr.sourceRefName === url.searchParams.get("searchCriteria.sourceRefName") &&
+          pr.targetRefName === url.searchParams.get("searchCriteria.targetRefName"));
+        return Response.json({ count: value.length, value });
       }
       if (path === api + "/diffs/commits" && url.searchParams.get("baseVersion") === pin &&
           url.searchParams.get("targetVersion") === tip) return Response.json({ commonCommit: git("merge-base", pin, tip) });
@@ -113,6 +127,12 @@ function createFixture() {
         const body = Buffer.concat([Buffer.from("001e# service=git-upload-pack\n0000"), refs]);
         return new Response(body, {headers: {"content-type": "application/x-git-upload-pack-advertisement"}});
       }
+      if (path === gitWritePath + "/info/refs" && url.search === "?service=git-receive-pack") {
+        const refs = execFileSync("git", ["receive-pack", "--stateless-rpc", "--advertise-refs", directory.path], {env: gitEnv});
+        return new Response(Buffer.concat([Buffer.from("001f# service=git-receive-pack\n0000"), refs]), {
+          headers: {"content-type": "application/x-git-receive-pack-advertisement"},
+        });
+      }
     }
     if (path === gitPath + "/git-upload-pack" && method === "POST") {
       const input = Buffer.from(await request.arrayBuffer());
@@ -123,9 +143,25 @@ function createFixture() {
       const output = execFileSync("git", uploadPack(), {input, env: gitEnv});
       return new Response(output, { headers: { "content-type": "application/x-git-upload-pack-result" } });
     }
+    if (path === gitWritePath + "/git-receive-pack" && method === "POST") {
+      const input = Buffer.from(await request.arrayBuffer());
+      const output = execFileSync("git", ["receive-pack", "--stateless-rpc", directory.path], {input, env: gitEnv});
+      return new Response(output, {headers: {"content-type": "application/x-git-receive-pack-result"}});
+    }
+    if (path === api + "/pullrequests" && method === "POST") {
+      const {sourceRefName, targetRefName, title, description} = await request.json() as {
+        sourceRefName: string; targetRefName: string; title: string; description: string;
+      };
+      git("show-ref", "--verify", sourceRefName);
+      git("show-ref", "--verify", targetRefName);
+      const pr = {sourceRefName, targetRefName, title, description, repository: {id: repo},
+        pullRequestId: pullRequests.length + 1, status: "active"};
+      pullRequests.push(pr);
+      return Response.json(pr, {status: 201});
+    }
     return null;
   };
-  return { pin, requests, handler, directory,
+  return { pin, requests, handler, directory, git, pullRequests,
     grantObserverRead() { observerAllowed = true; },
     advance() { write("Legacy.csproj", projectXml("v4.8.1")); tip = commit(); },
     refs() { return git("show-ref"); },
@@ -136,7 +172,6 @@ let fixture: ReturnType<typeof createFixture>;
 let harness: Harness;
 const network = new NetworkInterceptor({ handlers: [models.handler, (...args) => fixture.handler(...args)] });
 beforeAll(async () => {
-  fixture = createFixture();
   network.install();
   harness = await startHarness({ enableGadgetExecution: true, gatekeepers: [{
     binding: "AZURE_REPOS", dir: fileURLToPath(new URL("../../gatekeeper-azure-repos/", import.meta.url).href),
@@ -146,13 +181,14 @@ beforeAll(async () => {
     },
   }] });
 });
+beforeEach(() => { fixture = createFixture(); });
+afterEach(() => { fixture.directory.remove(); });
 afterAll(async () => {
   try {
     await harness?.server.close();
     expect(network.getUnmockedCalls()).toEqual([]);
   } finally {
     network.uninstall();
-    fixture?.directory.remove();
   }
 });
 
@@ -260,4 +296,108 @@ it("opens the chosen Azure revision and reads its .NET Framework evidence in a W
   using retry = stubFor(new ObserverConfigRecorder().alwaysChoose(observerAccount.id, 1));
   using allowed = await observer.openWorkspace(workspaceId, undefined, retry);
   expect((await allowed.getMetadata()).id).toBe(workspaceId);
+});
+
+const runCode = (id: string, body: string): ChatCompletionStep => ({
+  toolCall: {id, name: "executeCode", arguments: {code: `export default async function(self, env) { ${body} }`}},
+});
+
+it.each(["reject", "approve", "target advanced"] as const)(
+    "publishes the reviewed worktree commit only on approval (%s)", async decision => {
+  const [username] = nextUsernames("azurepublish");
+  using publicApi = connect(harness.url);
+  using api = await signUp(publicApi, username!);
+  const account = await connectAzure(api, pat);
+  const frame = await api.startResourceConfigurator(account.id, "branch");
+  using picker = frame.ui as unknown as RpcStub<BranchConfiguratorRpc>;
+  const {resourceUrl} = await picker.confirmBranch(project, repo, refName, fixture.pin);
+  if (!resourceUrl) throw new Error("The Azure picker did not confirm the selected revision.");
+  using ws = await api.newWorkspace();
+  using branch = await ws.newGatekeeper(account.id, resourceUrl);
+  if (!branch) throw new Error("Workshop did not attach the selected branch.");
+  using editor = await ws.createGadget("Editor", undefined, "EDITOR");
+  await editor.bind("AZURE_REPOS", await branch.getId());
+  const initialRefs = fixture.refs();
+  const model = models.script([
+    runCode("open", "return await env.AZURE_REPOS.getCheckout();"),
+    {toolCall: {id: "worktree", name: "createWorktree", arguments: {
+      bindingName: "SOURCE", title: "Edit the release", commitId: fixture.pin,
+    }}},
+    runCode("propose", `
+      await env.SOURCE.writeFile("note.txt", "Reviewed in Workshop.\\n");
+      const head = await env.SOURCE.commit("Add a release note");
+      const proposal = await env.AZURE_REPOS.proposePullRequest(head, "Release note", "Add a note for the release.");
+      await env.SOURCE.writeFile("private-draft.txt", proposal.sourceRefName);
+      return proposal;
+    `),
+    runCode("status", `return await env.AZURE_REPOS.getPublication(await env.SOURCE.readFile("private-draft.txt"));`),
+    {text: "Publication status checked."},
+  ]);
+  await api.addModel(model.userModel.profile, model.userModel.config);
+  const chatId = await ws.newChat("Add note.txt and propose a pull request.", SCRIPTED_MODEL_ID);
+  await waitFor("the worktree edit", async () => model.requests.length >= 3 || null);
+  await waitForIdleChat(ws, chatId);
+  const history = await loadAllChatHistory(before => ws.getChatHistory(chatId, before));
+  const action = (await ws.listActions({filter: "pending"})).entries.find(entry => entry.type === "action");
+  if (!action || action.type !== "action") {
+    const outputs = history.flatMap(entry => entry.type === "message" ? entry.toolCalls ?? [] : [])
+      .flatMap(call => call.toolName === "executeCode" ? [call.output] : []);
+    throw new Error("No pending publication: " + outputs.join("\n"));
+  }
+  const [approvedHead] = action.description.pushedCommits ?? [];
+  expect(approvedHead).toMatch(/^[0-9a-f]{40}$/);
+  const commits = history.flatMap(entry => entry.type === "changes" ? entry.worktreeCommits ?? [] : []);
+  expect(commits.map(change => change.commit)).toEqual([approvedHead]);
+  expect(action.description.autoApprovable).toBe(false);
+  const review = JSON.stringify(action.description.fields);
+  expect(review).toContain("note.txt");
+  expect(review).toContain("+Reviewed in Workshop.");
+  const writes = () => fixture.requests.filter(r => r.startsWith("POST ") && r !== "POST " + gitPath + "/git-upload-pack");
+  expect(writes()).toEqual([]);
+  expect(fixture.refs()).toBe(initialRefs);
+
+  if (decision === "target advanced") {
+    fixture.advance();
+    const advancedRefs = fixture.refs();
+    const newTip = fixture.git("rev-parse", refName);
+    expect(newTip).not.toBe(fixture.pin);
+    const refusal = await ws.approveAction(action.id).then(() => "", error => String(error));
+    expect(refusal).toMatch(/target branch moved.*review a new proposal/i);
+    expect(refusal).not.toContain(newTip);
+    expect(writes()).toEqual([]);
+    expect(fixture.pullRequests).toEqual([]);
+    expect(fixture.refs()).toBe(advancedRefs);
+    return;
+  }
+  if (decision === "reject") {
+    await ws.rejectAction(action.id);
+    expect(writes()).toEqual([]);
+    expect(fixture.refs()).toBe(initialRefs);
+    expect(fixture.pullRequests).toEqual([]);
+    await ws.sendChatMessage(chatId, "Check the publication status.", SCRIPTED_MODEL_ID);
+  } else {
+    await ws.approveAction(action.id);
+    expect(writes()).toEqual(["POST " + gitWritePath + "/git-receive-pack", `POST /${project}/_apis/git/repositories/${repo}/pullrequests`]);
+    expect(fixture.pullRequests).toHaveLength(1);
+    const [pull] = fixture.pullRequests;
+    expect(pull).toMatchObject({
+      sourceRefName: expect.stringMatching(/^refs\/heads\/agents\/[0-9a-f-]{36}$/),
+      targetRefName: refName, title: "Release note", description: "Add a note for the release.",
+    });
+    expect(fixture.git("rev-parse", pull.sourceRefName)).toBe(approvedHead);
+    expect(fixture.git("rev-parse", pull.sourceRefName + "^")).toBe(fixture.pin);
+    expect(fixture.git("show", pull.sourceRefName + ":note.txt")).toBe("Reviewed in Workshop.");
+    expect(fixture.git("ls-tree", "--name-only", pull.sourceRefName, "private-draft.txt")).toBe("");
+    expect(fixture.git("rev-parse", refName)).toBe(fixture.pin);
+  }
+  await waitFor("the publication status", async () => model.requests.length === 5 || null);
+  await waitForIdleChat(ws, chatId);
+  const expectedStatus = decision === "approve" ? "published" : "rejected";
+  expect(model.requests.at(-1)).toMatchObject({messages: expect.arrayContaining([
+    expect.objectContaining({role: "tool", tool_call_id: "status",
+      content: expect.stringContaining(`"status":"${expectedStatus}"`)}),
+  ])});
+  const publicationUrl = collection + gitPath + "/pullrequest/1";
+  expect(JSON.stringify(model.requests.at(-1)).includes(publicationUrl)).toBe(decision === "approve");
+  expect(JSON.stringify(model.requests)).not.toContain(pat);
 });

@@ -36,6 +36,7 @@ import {
 import type { UserAiModelRecord, WorkspaceOutputEntry } from "./storage-schema/user-storage";
 import { filesEqual, threeWayMerge, type MergeResult } from "./three-way-merge";
 import { GitCacheImpl, WorkspaceGitCache, assertNoNul, commitIdentityForAuthor } from "./git-cache";
+import { reviewGitPush } from "./git-push-review";
 import { blobByteStream, type BlobReader } from "./git-chunked-blob";
 import {
   OVERSEER_STORAGE_VERSION, migrateToActionIndexes, migrateToBlueprintUpstreams,
@@ -6874,6 +6875,19 @@ class OverseerImpl implements AgentHooks {
   async submitAction(gatekeeperId: number, action: number | "create",
                      description: ActionDescription, caller: GatekeeperCaller)
       : Promise<void> {
+    if (description.reviewPushFrom !== undefined) {
+      if (description.pushedCommits?.length !== 1) throw new Error("A reviewed push must declare exactly one head commit.");
+      if (!this.storage.containsRestrictedData.get()) {
+        const base = validateGitOid(description.reviewPushFrom);
+        if (!this.storage.gitObjectMetadata.get(base)?.onRemote.includes(gatekeeperId)) {
+          throw new Error("The review base must be a commit proven on this destination.");
+        }
+        // Authorize before reading local objects for the human's review. Recheck the connection and
+        // all policies below after the asynchronous walk, before persisting the action or its marks.
+        this.gitCache.verifyPushAncestry(gatekeeperId, description.pushedCommits);
+        description = await reviewGitPush(this.gitCache, base, description.pushedCommits[0], description);
+      }
+    }
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
@@ -6883,16 +6897,9 @@ class OverseerImpl implements AgentHooks {
           "removed from this workspace.");
     }
 
-    // Restricted mode: the approver vouches for the text they read, and a push's commits cannot
-    // be reviewed as text here, so a push is refused outright until there is a UI to review
-    // commits. Any other action pends for manual approval; one whose description is not complete
-    // (ActionDescription.descriptionIsComplete) is flagged to the approver rather than refused.
-    // The message reaches the agent as the tool error.
+    // A Git preview does not waive the workspace's restricted-data policy.
     if (this.storage.containsRestrictedData.get() && description.pushedCommits?.length) {
-      throw new Error(
-          "This workspace has observed sensitive data. To prevent leaks, an action is only accepted " +
-          "when the approver can review everything it will send, and a git push cannot be " +
-          "reviewed as of yet.");
+      throw new Error("Git pushes are disabled because this workspace has observed sensitive data.");
     }
 
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,
