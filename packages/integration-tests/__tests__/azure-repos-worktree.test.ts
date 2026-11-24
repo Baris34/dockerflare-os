@@ -30,8 +30,7 @@ const models = scriptedModelRouter();
 const projectXml = (target: string) =>
   `<Project><PropertyGroup><TargetFrameworkVersion>${target}</TargetFrameworkVersion></PropertyGroup></Project>\n`;
 
-// Only the Azure REST API is synthetic. Native Git supplies every OID, object and protocol
-// response, so the worktree assertion exercises the real gatekeeper -> kernel pack transfer.
+// The fixture enforces Azure's multi-ack requirement, then delegates the transfer to native Git.
 function createFixture() {
   const directory = mkdtempDisposableSync(join(tmpdir(), "workshop-azure-repos-"));
   const git = (...args: string[]) => execFileSync("git", ["-C", directory.path, ...args], { encoding: "utf8" }).trim();
@@ -117,6 +116,10 @@ function createFixture() {
     }
     if (path === gitPath + "/git-upload-pack" && method === "POST") {
       const input = Buffer.from(await request.arrayBuffer());
+      const want = input.toString("ascii", 4, input.indexOf(0x0a)).split(" ");
+      if (!want.includes("multi_ack_detailed") && !want.includes("multi_ack")) {
+        return new Response("TF401041: The Git protocol sent is not as expected. Clients must support multi-ack.", {status: 400});
+      }
       const output = execFileSync("git", uploadPack(), {input, env: gitEnv});
       return new Response(output, { headers: { "content-type": "application/x-git-upload-pack-result" } });
     }

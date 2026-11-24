@@ -36,7 +36,11 @@ function wantCapabilities(bytes: Uint8Array, commitId: string): string {
   }
   const sideband = ["side-band-64k", "side-band"].find(cap => caps.has(cap));
   if (!sideband) throw new Error("Azure Git does not support side-band snapshot transfers.");
-  return caps.has("no-progress") ? sideband + " no-progress" : sideband;
+  const multiAck = ["multi_ack_detailed", "multi_ack"].find(cap => caps.has(cap));
+  const selected = [sideband];
+  if (multiAck) selected.push(multiAck);
+  if (caps.has("no-progress")) selected.push("no-progress");
+  return selected.join(" ");
 }
 
 /** Fetch the selected revision with depth one over classic smart HTTP, including its trees and blobs. */
@@ -84,6 +88,7 @@ export async function fetchSnapshotPack(commitId: string, upload: UploadPack) {
         if (item.kind !== "data" || state === "done") throw new Error("Invalid Azure Git packet sequence.");
         if (state === "negotiate") {
           const line = pktText(item.data);
+          // A fresh snapshot sends no "have" lines, so even multi-ack ends with NAK.
           if (line !== "NAK") throw new Error("Azure Git rejected the selected revision.");
           state = "pack";
         } else if (item.data[0] === 1) {

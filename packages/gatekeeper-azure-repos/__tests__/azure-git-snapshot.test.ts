@@ -72,14 +72,21 @@ it("fetches just the selected snapshot from a classic unfiltered Git server", as
   }
 });
 
-it("uses the advertised side-band variant and omits unsupported capabilities", async () => {
-  const refs = banner + pkt("b".repeat(40) + " HEAD\0side-band shallow\n") +
+it.each([
+  ["multi_ack multi_ack_detailed", ["multi_ack_detailed"]],
+  ["multi_ack_detailed", ["multi_ack_detailed"]],
+  ["multi_ack", ["multi_ack"]],
+  ["", []],
+])("negotiates the advertised ACK mode (%s) in both shallow fetch requests", async (offered, selected) => {
+  const refs = banner + pkt("b".repeat(40) + " HEAD\0" + ["side-band", "shallow", offered].filter(Boolean).join(" ") + "\n") +
     pkt(oid + " refs/heads/release\n") + "0000";
   const result = boundary + pkt("NAK\n") + pkt("\u0002progress") + pkt("\u0001" + "x".repeat(32)) + "0000";
   const stream = await fetchSnapshotPack(oid, async body => {
     if (!body) return new Response(refs);
     const text = Buffer.from(body).toString();
-    if (!text.includes(pkt("want " + oid + " side-band\n"))) return new Response(null, {status: 400});
+    const [command, revision, ...capabilities] = text.slice(4, text.indexOf("\n")).split(" ");
+    expect([command, revision]).toEqual(["want", oid]);
+    expect(capabilities.toSorted()).toEqual(["side-band", ...selected].toSorted());
     return new Response(text.endsWith("0000") ? boundary : result);
   });
   expect(await new Response(stream).text()).toBe("x".repeat(32));
