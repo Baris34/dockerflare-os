@@ -1,0 +1,29 @@
+# Docker üzerinde self-hosting incelemesi
+
+24 Kasım 2026 tarihinde `2ca27fb0` revizyonundaki kaynak kod incelendi. Aşağıdaki bulgular kurulum, bir ajan turunun çalışması ve verinin yeniden başlatma sonrasında korunmasıyla ilgili.
+
+## Bir sohbet isteği nereden geçiyor?
+
+1. Workshop arayüzü Cap’n Web üzerinden WebSocket oturumu açıyor. Router, `/api` isteklerini çekirdeğe ve `/gatekeeper/<ad>` isteklerini ilgili entegrasyona iletiyor. Diğer yollar statik arayüze gidebiliyor. Ayrı bir web servisi kullanıldığında aynı origin, WebSocket yükseltmesi ve OAuth dönüş yolları birlikte ele alınmalı. [Arayüz girişi](../packages/workshop-frontend/src/main.tsx) · [Router](../packages/router/src/index.ts)
+2. Çekirdek, kullanıcıya ait model ayarını alıyor. Çalışma alanını yöneten `OverseerDurableObject`, seçilen model için bir istemci oluşturup ajan turunu yürütüyor. Bir modelin ekranda seçilebilmesi, çalıştığına dair tek başına yeterli kanıt sağlamıyor. İstek gövdesi, akış yanıtı ve araç sonucuyla devam eden ikinci istek de gözlenebilir. [Kullanıcı ve model seçimi](../packages/workshop-backend/src/user.ts) · [Ajan turu](../packages/workshop-backend/src/overseer.ts) · [Model istemcileri](../packages/workshop-backend/src/ai-models.ts)
+3. Ajan kodu ve gadget’lar `LOADER` ile oluşturulan Worker’larda koşuyor. Çekirdek bunlara izin verilen kaynakları açıkça bağlıyor ve genel ağ çıkışını kapatıyor. Entegrasyonlar ayrı Worker olmalarına rağmen bir çalışma alanına, o alana ait yetki ve durum taşıyan bir Durable Object facet üzerinden bağlanabiliyor. Dolayısıyla her entegrasyonu ayrı bir container’da bağımsız sürümlemek, mevcut RPC ve facet davranışlarının süreç sınırından nasıl geçeceğini de çözmeyi gerektiriyor. [Çekirdek yapılandırması](../packages/workshop-backend/cloudflare.config.ts) · [Gadget, gatekeeper ve ajan kodunun yürütülmesi](../packages/workshop-backend/src/overseer.ts)
+
+## Dağıtımda hangi parçalar karşılanmalı?
+
+| Parça | Depodaki davranış | Docker dağıtımına etkisi |
+| --- | --- | --- |
+| Başlatma | `pnpm run-local` paket kuruyor, çıktı üretiyor ve Wrangler’ın geliştirme sunucusunu başlatıyor. | Bağımlılık kurulumu ve derleme imaj üretiminde yapılabilir. Sunucunun açılışı hazır çıktıları kullanmalı. [Başlatıcı](../scripts/run-local.ts) |
+| Kullanıcılar ve çalışma alanları | Kullanıcı ve Overseer sınıfları SQLite tabanlı Durable Object olarak tanımlı. Zamanlanmış işler Durable Object alarmları kullanıyor. | Kalıcı volume yanında yeniden açılma ve alarm teslimi sınanmalı. [Sınıflar ve migration’lar](../packages/workshop-backend/cloudflare.config.ts) · [Alarm kullanan çekirdek](../packages/workshop-backend/src/overseer.ts) |
+| Şablonlar ve avatarlar | İlk API isteğinde yerleşik şablonların Git paketleri R2’ye, üstverileri KV’ye yazılıyor. Avatarlar ayrı KV alanında. | İlk kurulumun çalışması için KV ve nesne depolama davranışı gerekiyor. Yedek ve geri yükleme aynı kurulumun bu verilerini de kapsamalı. [Şablon kurulumu](../packages/workshop-backend/src/bundled-blueprints.ts) · [Depolama tanımları](../packages/workshop-backend/cloudflare.config.ts) |
+| Giriş | Yerleşik kullanıcı adı ve parola akışı var. Dağıtım betiği arayüzü Cloudflare Access modunda derliyor. | Build sırasında giriş modu bilinçli seçilmeli. Kabul testi yeni hesap açmayı ve tekrar giriş yapmayı içermeli. [Giriş](../packages/workshop-frontend/src/useAuth.ts) · [Release build](../scripts/release/build-release.ts) |
+| Ek özellikler | Bazı gadget dışa aktarımları tarayıcı kullanıyor. Web belgelerinin bazı türlerini Markdown’a çevirmek Workers AI kullanıyor. | Temel sohbetin çalışması bu özellikleri doğrulamaz. Dağıtım hangi özellikleri sunuyorsa onlar için bağlanan servis ve test ayrıca belirtilmeli. [Dışa aktarma](../packages/workshop-backend/src/browser-export.ts) · [Belge dönüştürme](../packages/workshop-backend/src/web-fetch.ts) |
+
+## OpenAI uyumlu model endpoint’i
+
+Mevcut doğrudan OpenAI sağlayıcısı Responses API’yi seçiyor. Ollama sağlayıcısı Chat Completions kullanıyor ve anahtar verilmediğinde Authorization başlığını göndermiyor. Kaynak kod genel amaçlı OpenAI uyumlu uçlar için ayrı sağlayıcı gereksinimini de kaydediyor. Arayüzde sunucu adresi, model adı, bağlam penceresi ve çıktı sınırı için alanlar mevcut. Genel OpenAI uyumlu bağlantı aynı akıştan yararlanabilir. Kullanıcı kendi model sunucusunun API kökünü ve sunulan model adını girer. vLLM bu API’yi sunabilen yazılımlardan biridir. [Sağlayıcı seçimi](../packages/workshop-backend/src/ai-models.ts) · [Model ekleme formu](../packages/workshop-frontend/src/AddModelModal.tsx)
+
+Model sunucusu aynı Docker ağında `http://inference:8000/v1` gibi bir adreste olabilir. Standalone workerd genel ağ çıkışında özel ağları varsayılan olarak engelliyor. Model sunucusuna erişim, işletmecinin belirlediği hedefle sınırlandırılabilir. Harness için sunucunun araç çağrısı da döndürebilmesi gerekir. Örneğin vLLM’de bu davranış sunucu tarafındaki model, parser ve sohbet şablonuna bağlıdır. [Çekirdeğin ağ politikası](../packages/workshop-backend/cloudflare.config.ts) · [vLLM araç çağrıları](https://docs.vllm.ai/en/stable/features/tool_calling/)
+
+## Çalışan kurulum için kabul senaryosu
+
+Boş bir volume ile hesap ve çalışma alanı açılır. Servis edilen modele bir araç çağrısı yaptırılır, araç sonucu aynı sohbette modele geri verilir ve bir gadget kaydedilir. Uygulama container’ı aynı volume ile yeniden oluşturulur. Aynı hesapla giriş yapılır, sohbet geçmişi okunur ve gadget tekrar açılır. Model erişimi sınırlandırıldıysa genel web aracının özel ağlara erişemediği de doğrulanır. Depodaki senaryolu model ve gerçek Worker entegrasyonları protokol testlerine temel sağlıyor. İki imajla uçtan uca sınama ve container yeniden oluşturma dağıtım seviyesinde ayrıca yapılmalı. [Entegrasyon testleri](integration-testing.md) · [Senaryolu model](../packages/integration-tests/src/mock-model.ts)
